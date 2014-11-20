@@ -1352,7 +1352,97 @@ def remove_background(in_file, out_file, start_height, radius, max_height, voxel
 def connected_component_labeling(in_file, out_file):
     """
     perform connected component labeling on voxels
+
+    we implement the algorithm in :
+        http://www.codeproject.com/Articles/336915/Connected-Component-Labeling-Algorithm#Unify
     """
+    import csv
+    with open(in_file) as incsv:
+        reader = csv.reader(incsv)
+        lines = [[row[0], row[1], row[2], row[3], row[4], row[5]] for row in reader]
+
+    original_code_array = np.array(lines)[:, 0]
+
+    point_counts_array = np.array(lines)[:, 1]
+    olocation_array = np.array(lines)[:, 2]
+    mlocation_array = np.array(lines)[:, 3]
+    pole_id_array = np.array(lines)[:, 4]
+    foreground_flag = np.array(lines)[:, 5]
+
+    foreground_indices = np.where(foreground_flag != '0')[0]
+    x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array[foreground_indices]))
+    y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array[foreground_indices]))
+    z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array[foreground_indices]))
+
+    fore_voxel_length = len(foreground_indices)
+
+    label_array = np.array([0] * fore_voxel_length)
+    parent_array = np.array([0] * fore_voxel_length)
+    label_count = 0
+    voxel_count = 0
+
+    # first pass
+    while voxel_count < fore_voxel_length:
+        # finding the neighbors of each voxel of foreground
+        x_valid = np.logical_and(x_int_array - x_int_array[voxel_count] >= -1,
+                                 x_int_array - x_int_array[voxel_count] <= 1)
+        y_valid = np.logical_and(y_int_array - y_int_array[voxel_count] >= -1,
+                                 y_int_array - y_int_array[voxel_count] <= 1)
+        z_valid = np.logical_and(z_int_array - z_int_array[voxel_count] >= -1,
+                                 z_int_array - z_int_array[voxel_count] <= 1)
+        neighbors = np.where(x_valid & y_valid & z_valid)[0]
+
+        # the situation that voxel is isolated or surrounded by non-labeled voxels
+        if len(neighbors) == 0 or list(label_array[neighbors]) == [0] * len(neighbors):
+            label_count += 1
+            label_array[voxel_count] = label_count
+            parent_array[voxel_count] = label_count
+        # the situation that the voxel is surrounded by same voxels
+        elif len(set(label_array[neighbors])) == 1:
+            label_array[voxel_count] = label_array[neighbors[0]]
+        elif len(set(label_array[neighbors])) == 2 and list(label_array[neighbors]).count(0) != 0:
+            neighbors_labels = label_array[neighbors]
+            label_array[voxel_count] = neighbors_labels[neighbors_labels != 0][0]
+            parent_array[voxel_count] = neighbors_labels[neighbors_labels != 0][0]
+        # the situation that the voxel is surrounded by different voxels, we assign min neighbor's parent neighbor to
+        # current voxel and parent
+        else:
+            if list(label_array[neighbors]).count(0) == 0:
+                label_array[voxel_count], parent_array[voxel_count] = \
+                    min(label_array[neighbors]), min(label_array[neighbors])
+            else:
+                new_set = set(label_array[neighbors])
+                new_set.remove(0)
+                label_array[voxel_count], parent_array[voxel_count] = min(new_set), min(new_set)
+            for item in new_set:
+                if item != parent_array[voxel_count]:
+                    parent_array[label_array == item] = parent_array[voxel_count]
+        voxel_count += 1
+    # second pass
+    pattern_count = 1
+    parent_set = set(parent_array)
+    label_array[:] = 0
+    for unique_parent in parent_set:
+        if len(label_array[parent_array == unique_parent]) > 50:
+            label_array[parent_array == unique_parent] = pattern_count
+            pattern_count += 1
+
+    # label all the voxels, back ground is labeled as 0
+    all_label_array = np.array([0] * len(original_code_array))
+    count = 0
+    for indice in foreground_indices:
+        all_label_array[indice] = label_array[count]
+        count += 1
+
+    count = 0
+    voxel_length = len(original_code_array)
+    with open(out_file, 'wb') as outcsv:
+        writer = csv.writer(outcsv)
+        while count < voxel_length:
+            writer.writerow([original_code_array[count], point_counts_array[count], olocation_array[count],
+                             mlocation_array[count], pole_id_array[count], foreground_flag[count],
+                             all_label_array[count]])
+            count += 1
 
 
 def label_points_location(las_path, voxel_path):
@@ -1365,14 +1455,18 @@ def label_points_location(las_path, voxel_path):
     location_label = []
     with open(voxel_path) as voxel_file:
         reader = csv.reader(voxel_file)
-        location_label = [[row[2], row[3], row[4], row[5]] for row in reader]
+        location_label = [[row[2], row[3], row[4], row[5], row[6]] for row in reader]
     point_count = 0
     lasfile.user_data[:] = 0
     for voxel_index in lasfile.voxel_index:
         lasfile.olocation[point_count] = location_label[voxel_index][0]
         lasfile.mlocation[point_count] = location_label[voxel_index][1]
+        # user_data is corresponding to pole location
         lasfile.user_data[point_count] = location_label[voxel_index][2]
-        lasfile.pt_src_id[point_count] = location_label[voxel_index][3]
+        # classification is corresponding to fore or back ground
+        lasfile.raw_classification[point_count] = location_label[voxel_index][3]
+        #
+        lasfile.pt_src_id[point_count] = location_label[voxel_index][4]
         point_count += 1
     lasfile.close()
 
@@ -1444,6 +1538,7 @@ outcsv1 = outlas[:-4] + '_1.csv'
 outcsv2 = outlas[:-4] + '_2.csv'
 outcsv3 = outlas[:-4] + '_3.csv'
 outcsv4 = outlas[:-4] + '_4.csv'
+outcsv5 = outlas[:-4] + '_5.csv'
 loop = True
 while loop:
     x = raw_input("\n Step:")
@@ -1479,8 +1574,12 @@ while loop:
         print 'Step 6 costs', time.clock() - start
     elif x == '7':
         start = time.clock()
-        label_points_location(outlas, outcsv4)
-        print "Step 4 costs seconds", time.clock() - start
+        connected_component_labeling(outcsv4, outcsv5)
+        print 'Step 7 costs', time.clock() - start
+    elif x == '8':
+        start = time.clock()
+        label_points_location(outlas, outcsv5)
+        print "Step 8 costs seconds", time.clock() - start
         loop = False
     else:
         start = time.clock()
