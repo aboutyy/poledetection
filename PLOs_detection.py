@@ -6,7 +6,9 @@ import time
 import os
 import csv
 import numpy as np
-
+import scipy
+from scipy import linalg as la
+import scipy.spatial
 OPTIMAL_DIMENSION_NAME = 'optimal_dimensionalities'
 OPTIMAL_NX_NAME = 'optimal_nx'
 OPTIMAL_NY_NAME = 'optimal_ny'
@@ -183,16 +185,18 @@ def original_localization(csv_path, csv_out_path, voxel_size, min_position_heigh
 
     vertical_count_threshold = int(min_position_height / voxel_size)
     temp = [1] * vertical_count_threshold
-
+    temp1 = [1] * 2
     # traverse all the voxel to assign location label
     while voxel_count < length - vertical_count_threshold:
         v1 = voxel_code_int_array[voxel_count:voxel_count + vertical_count_threshold]
         v2 = voxel_code_int_array[voxel_count + 1:voxel_count + 1 + vertical_count_threshold]
+        v3 = voxel_code_int_array[voxel_count:voxel_count + 1]
+        v4 = voxel_code_int_array[voxel_count + 1:voxel_count + 2]
         v = list(map(lambda x: x[0] - x[1], zip(v2, v1)))
         # judge if the vertical_count_threshold number of voxel value are continuous
         if v == temp:
             location_id_array[voxel_count:voxel_count + 1 + vertical_count_threshold] = location_count
-            voxel_count += vertical_count_threshold +1
+            voxel_count += vertical_count_threshold + 1
             while voxel_code_int_array[voxel_count] - voxel_code_int_array[voxel_count - 1] == 1 \
                     and voxel_count < length:
                 location_id_array[voxel_count] = location_count
@@ -211,6 +215,10 @@ def original_localization(csv_path, csv_out_path, voxel_size, min_position_heigh
         # 2. when the voxels after more than threshold number of voxels are not continuous
         # then these voxels are considered as no-location voxel
         # 此处可以测试是否第二种情况可以间隔几个voxel也算location，这样可以解决稀疏情况下的问题
+        # 如果存在连续三个voxel在同一x，y处的话，则不标记，继续，不是背景点也不是物体点
+        elif list(map(lambda x: x[0] - x[1], zip(v4, v3))) == [1, 1]:
+            voxel_count += 3
+        # 不是物体点则被标记为背景点
         else:
             voxel_count += 1
             change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
@@ -332,18 +340,275 @@ def merging_neighbor_location(csv_path, csv_out_path):
             row += 1
 
 
-def remove_background(in_file, out_file, start_height, radius, max_height, voxel_size):
-    """
-    find out both the background voxel and foreground voxel and label them 0 and 1 respectively
+def connected_component_labeling(voxelset, radius):
+    label_array = np.array([0] * len(voxelset))
+    parent_array = np.array([0] * len(voxelset))
+    label_count = 0
+    voxel_count = 0
+    tree = scipy.spatial.cKDTree(voxelset)
+    # first pass
+    for voxel in voxelset:
+        # finding the neighbors of each voxel of foreground
+        neighbors = tree.query_ball_point(voxel, radius)
+        # the situation that voxel is isolated or surrounded by non-labeled voxels
+        if len(neighbors) == 0 or list(label_array[neighbors]) == [0] * len(neighbors):
+            label_count += 1
+            label_array[voxel_count] = label_count
+            parent_array[voxel_count] = label_count
+        # the situation that the voxel is surrounded by same voxels
+        elif len(set(label_array[neighbors])) == 1:
+            label_array[voxel_count] = label_array[neighbors[0]]
+        elif len(set(label_array[neighbors])) == 2 and list(label_array[neighbors]).count(0) != 0:
+            neighbors_labels = label_array[neighbors]
+            label_array[voxel_count] = neighbors_labels[neighbors_labels != 0][0]
+            parent_array[voxel_count] = neighbors_labels[neighbors_labels != 0][0]
+        # the situation that the voxel is surrounded by different voxels, we assign min neighbor's parent neighbor to
+        # current voxel and parent
+        else:
+            if list(label_array[neighbors]).count(0) == 0:
+                label_array[voxel_count], parent_array[voxel_count] = \
+                    min(label_array[neighbors]), min(label_array[neighbors])
+            else:
+                new_set = set(label_array[neighbors])
+                new_set.remove(0)
+                label_array[voxel_count], parent_array[voxel_count] = min(new_set), min(new_set)
+            for item in new_set:
+                if item != parent_array[voxel_count]:
+                    parent_array[label_array == item] = parent_array[voxel_count]
+        voxel_count += 1
+    # second pass
+    pattern_count = 1
+    parent_set = set(parent_array)
+    label_array[:] = 0
+    for unique_parent in parent_set:
+        unique_parent_indices = np.where(parent_array == unique_parent)[0]
+        if len(label_array[unique_parent_indices]) > 200:
+            label_array[parent_array == unique_parent] = pattern_count
+            pattern_count += 1
+    return label_array
 
-    Args:
-        in_file: the path of input csv file comtaining code, point number, olocation, mlocation, pole part column
-        out_file: add a new column to store the background foreground label
-        start_height: the cylinder will start from start_height to build the cylinder to filter foreground
+
+def remove_background_region_growing(in_file, outfile_path, fixed_radius, normal_threshold):
+    """
+    存有区域增长的代码，以后备用
+    romove the back ground based on the vertical continuous height of each x,y on xy plane
+    if the continious height
+    """
+
+    with open(in_file, 'rb') as incsv:
+        reader = csv.reader(incsv)
+        lines = [[row[0], row[1], row[2]] for row in reader]
+    original_code_array = np.array(lines)[:, 0]
+    original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
+    original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
+    original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
+
+    points_count_array = np.array(lines)[:, 1]
+    intensity_array = np.array(lines)[:, 2]
+
+    normal_list = []
+    dataset = np.vstack([original_x_int_array, original_y_int_array, original_z_int_array]).transpose()
+    tree = scipy.spatial.cKDTree(dataset)
+    for x, y, z in zip(original_x_int_array, original_y_int_array, original_z_int_array):
+        indices = tree.query_ball_point([x, y, z], fixed_radius)
+        if len(indices) <= 3:
+            normal_list.append(0)
+            continue
+        idx = tuple(indices)
+        data = np.vstack([dataset[idx, 0], dataset[idx, 1], dataset[idx, 2]])
+        cov = np.cov(data)
+        evals, evects = la.eigh(cov)
+        evals = np.abs(evals)
+        index = evals.argsort()[::-1]
+        evects = evects[:, index]
+        normal = evects[2][2]
+        normal_list.append(normal)
+
+    # codes below were region growing algorithm implemented based pseudocode in
+    # http://pointclouds.org/documentation/tutorials/region_growing_segmentation.php#region-growing-segmentation
+    # awailable voxel list index
+    seeds = np.where(np.logical_or(np.array(normal_list) > 0.7, np.array(normal_list) < -0.7))[0]
+    # seeds = original_z_int_array[seeds].argsort()
+    seeds = list(seeds)
+    dataset1 = np.vstack([original_x_int_array[seeds], original_y_int_array[seeds],
+                          original_z_int_array[seeds]]).transpose()
+    tree1 = scipy.spatial.cKDTree(dataset1)
+    # region list
+    regions = []
+    while len(seeds) > 0:
+        current_region_voxels = []
+        current_seeds = []
+        # voxel with lowest z value
+        lowest_voxel = seeds[0]
+        current_seeds.append(lowest_voxel)
+        current_region_voxels.append(lowest_voxel)
+        del seeds[0]
+        count = 0
+        while count < len(current_seeds):
+            current_seed = current_seeds[count]
+            count += 1
+            current_seed_neighbors = \
+                tree1.query_ball_point([original_x_int_array[current_seed], original_y_int_array[current_seed],
+                                      original_z_int_array[current_seed]], fixed_radius)
+            for neighbor in current_seed_neighbors:
+                if seeds.count(neighbor) != 0:
+                        if current_region_voxels.count(neighbor) == 0:
+                            current_region_voxels.append(neighbor)
+                        seeds.remove(neighbor)
+                        if current_seeds.count(neighbor) == 0:
+                            current_seeds.append(neighbor)
+        regions.append(current_region_voxels)
+    length = len(original_code_array)
+    ground_list = [0] * length
+    region_count = 1
+    for region in regions:
+        for voxel in region:
+            ground_list[voxel] = region_count
+        region_count += 1
+    with open(outfile_path, 'wb') as out_csv_file:
+        csvwriter = csv.writer(out_csv_file)
+        row = 0
+        while row < length:
+            csvwriter.writerow([original_code_array[row], points_count_array[row], intensity_array[row],
+                                normal_list[row], ground_list[row]])
+            row += 1
+
+
+def region_growing(voxelset, radius):
+    # codes below were region growing algorithm implemented based pseudocode in
+    # http://pointclouds.org/documentation/tutorials/region_growing_segmentation.php#region-growing-segmentation
+    # awailable voxel list index
+
+    tree1 = scipy.spatial.cKDTree(voxelset)
+    length = len(voxelset)
+    voxel_indices = range(length)
+    seed_length = len(voxel_indices)
+    # region list
+    regions = []
+    while seed_length > 0:
+        current_region_voxels = []
+        current_seeds = []
+        # voxel with lowest z value
+        lowest_voxel_indice = voxel_indices[0]
+        current_seeds.append(lowest_voxel_indice)
+        current_region_voxels.append(lowest_voxel_indice)
+        del voxel_indices[0]
+        count = 0
+        while count < len(current_seeds):
+            current_seed = current_seeds[count]
+            count += 1
+            current_seed_neighbors = \
+                tree1.query_ball_point([voxelset[:, 0][current_seed], voxelset[:, 1][current_seed],
+                                        voxelset[:, 2][current_seed]], radius)
+            for neighbor in current_seed_neighbors:
+                if voxel_indices.count(neighbor) != 0:
+                        if current_region_voxels.count(neighbor) == 0:
+                            current_region_voxels.append(neighbor)
+                        voxel_indices.remove(neighbor)
+                        if current_seeds.count(neighbor) == 0:
+                            current_seeds.append(neighbor)
+        regions.append(current_region_voxels)
+        seed_length = len(voxel_indices)
+    return regions
+
+
+def remove_background(in_file, outfile_path, fixed_radius, normal_threshold):
+    """
+    romove the back ground based on the vertical continuous height of each x,y on xy plane
+
+    if the continious height
     """
     with open(in_file, 'rb') as incsv:
         reader = csv.reader(incsv)
-        lines = [[row[0], row[1], row[2], row[3], row[4], row[5]] for row in reader]
+        lines = [[row[0], row[1], row[2], row[3], row[4]] for row in reader]
+    original_code_array = np.array(lines)[:, 0]
+    length = len(original_code_array)
+    original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
+    original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
+    original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
+
+    points_count_array = np.array(lines)[:, 1]
+    intensity_array = np.array(lines)[:, 2]
+    olocation_array = np.array(lines)[:, 3]
+    mlocation_array = np.array(lines)[:, 4]
+    normal_list = []
+    dataset = np.vstack([original_x_int_array, original_y_int_array, original_z_int_array]).transpose()
+    tree = scipy.spatial.cKDTree(dataset)
+    for x, y, z in zip(original_x_int_array, original_y_int_array, original_z_int_array):
+        indices = tree.query_ball_point([x, y, z], fixed_radius)
+        if len(indices) <= 3:
+            normal_list.append(0)
+            continue
+        idx = tuple(indices)
+        data = np.vstack([dataset[idx, 0], dataset[idx, 1], dataset[idx, 2]])
+        cov = np.cov(data)
+        evals, evects = la.eigh(cov)
+        evals = np.abs(evals)
+        index = evals.argsort()[::-1]
+        evects = evects[:, index]
+        normal = evects[2][2]
+        normal_list.append(normal)
+
+    # codes below were region growing algorithm implemented based pseudocode in
+    # http://pointclouds.org/documentation/tutorials/region_growing_segmentation.php#region-growing-segmentation
+    # awailable voxel list index
+    seeds = np.where(np.logical_or(np.array(normal_list) > normal_threshold, np.array(normal_list) <
+                                   -normal_threshold))[0]
+    # seeds = original_z_int_array[seeds].argsort()
+    seeds = list(seeds)
+    voxel_set = np.vstack([original_x_int_array[seeds], original_y_int_array[seeds],
+                          original_z_int_array[seeds]]).transpose()
+    regions = region_growing(voxel_set, 1.5)
+    # regions = connected_component_labeling(voxel_set, 1.5)
+    ground_list = [0] * length
+    region_count = 1
+    for region in regions:
+        if float(len(region))/length < 0.1:
+            continue
+        else:
+            for indice in region:
+                ground_list[seeds[indice]] = region_count
+
+    # label_list = connected_component_labeling(voxel_set, 1.6)
+    # length = len(original_code_array)
+    # ground_list = [0] * length
+    # count = 0
+    # for label in label_list:
+    #     ground_list[seeds[count]] = label
+    #     count += 1
+
+    with open(outfile_path, 'wb') as out_csv_file:
+        csvwriter = csv.writer(out_csv_file)
+        row = 0
+        while row < length:
+            csvwriter.writerow([original_code_array[row], points_count_array[row], intensity_array[row],
+                                olocation_array[row], mlocation_array[row], normal_list[row], ground_list[row]])
+            row += 1
+
+
+def pole_position_detection(infile_path, outfile_path, voxelsize, fixed_radius, normal_threshold):
+    with open(infile_path, 'rb') as incsv:
+        reader = csv.reader(incsv)
+        lines = [[row[0], row[1], row[2]] for row in reader]
+    original_code_array = np.array(lines)[:, 0]
+    original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
+    original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
+    original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
+    point_counts_array = np.array(lines)[:, 1]
+    intensity_array = np.array(lines)[:, 2]
+    olocation_array = np.array(lines)[:, 3]
+    mlocation_array = np.array(lines)[:, 4]
+    normal_array = np.array(lines)[:, 5]
+    ground_list = np.array(lines)[:, 6]
+
+
+def write_normal(in_file, out_file, fixed_radius):
+    import scipy
+    from scipy import linalg as la
+
+    with open(in_file, 'rb') as incsv:
+        reader = csv.reader(incsv)
+        lines = [[row[0], row[1], row[2], row[3], row[4]] for row in reader]
     original_code_array = np.array(lines)[:, 0]
     original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
     original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
@@ -354,41 +619,32 @@ def remove_background(in_file, out_file, start_height, radius, max_height, voxel
     olocation_array = np.array(lines)[:, 3]
     mlocation_array = np.array(lines)[:, 4]
 
-    mlocation_set = list(set(mlocation_array[mlocation_array != '0']))
-    foreground_indices = []
-
-    for pole_location in mlocation_set:
-        voxel_indices = np.where(mlocation_array == pole_location)
-        voxel_indices = list(voxel_indices[0])
-        center_x = int(sum(original_x_int_array[voxel_indices]) / len(original_x_int_array[voxel_indices]) + 0.5)
-        center_y = int(sum(original_y_int_array[voxel_indices]) / len(original_y_int_array[voxel_indices]) + 0.5)
-        center_z = min(original_z_int_array[voxel_indices]) + start_height / voxel_size
-
-        x_valid = np.logical_and(original_x_int_array - center_x <= radius /voxel_size,
-                                 original_x_int_array - center_x >= -radius /voxel_size)
-        y_valid = np.logical_and(original_y_int_array - center_y <= radius / voxel_size,
-                                 original_y_int_array - center_y >= -radius / voxel_size)
-        z_valid = np.logical_and(original_z_int_array >= center_z,
-                                 original_z_int_array <= max_height / voxel_size + center_z)
-        valid_voxel_indices = np.where(x_valid & y_valid & z_valid)
-        foreground_indices = np.append(foreground_indices, valid_voxel_indices)
-        foreground_indices = np.append(foreground_indices, voxel_indices)
-        foreground_indices = np.array(list(set(foreground_indices)))
-
+    normal_list = []
+    dataset = np.vstack([original_x_int_array, original_y_int_array, original_z_int_array]).transpose()
+    tree = scipy.spatial.cKDTree(dataset)
+    for x, y, z in zip(original_x_int_array, original_y_int_array, original_z_int_array):
+        indices = tree.query_ball_point([x, y, z], fixed_radius)
+        if len(indices) <= 3:
+            continue
+        idx = tuple(indices)
+        data = np.vstack([dataset[idx, 0], dataset[idx, 1], dataset[idx, 2]])
+        cov = np.cov(data)
+        evals, evects = la.eigh(cov)
+        evals = np.abs(evals)
+        index = evals.argsort()[::-1]
+        evects = evects[:, index]
+        normal_list.append(evects[2])
     length = len(original_code_array)
-    foreground_flag = np.array([0] * length)
-    foreground_flag[list(foreground_indices)] = 1
-    foreground_flag[mlocation_array != '0'] = 1
     count = 0
     with open(out_file, 'wb') as out_csv:
         writer = csv.writer(out_csv)
         while count < length:
             writer.writerow([original_code_array[count], point_counts_array[count], intensity_array[count],
-                             olocation_array[count], mlocation_array[count], foreground_flag[count]])
+                             olocation_array[count], mlocation_array[count], normal_list[count]])
             count += 1
 
 
-def connected_component_labeling(in_file, out_file):
+def connected_component_labeling_file(in_file, out_file):
     """
     perform connected component labeling on voxels
 
@@ -460,12 +716,14 @@ def connected_component_labeling(in_file, out_file):
     parent_set = set(parent_array)
     label_array[:] = 0
     for unique_parent in parent_set:
-        if len(label_array[parent_array == unique_parent]) > 50:
-            label_array[parent_array == unique_parent] = pattern_count
-            pattern_count += 1
+        unique_parent_indices = np.where(parent_array == unique_parent)[0]
+        foregound_mlocation_array = mlocation_array[foreground_indices]
+        if len(set(foregound_mlocation_array[unique_parent_indices])) > 1:
+            if len(label_array[unique_parent_indices]) > 30:
+                label_array[parent_array == unique_parent] = pattern_count
+                pattern_count += 1
 
     # label all the voxels, back ground is labeled as 0
-
 
     all_label_array = np.array([0] * len(original_code_array))
     count = 0
@@ -569,21 +827,20 @@ def label_points_location(las_path, voxel_path):
     """
     import csv
     lasfile = laspy.file.File(las_path, mode="rw")
-    location_label = []
     with open(voxel_path) as voxel_file:
         reader = csv.reader(voxel_file)
-        location_label = [[row[2], row[3], row[4], row[5], row[6]] for row in reader]
+        location_label = [[row[3], row[4], row[5], row[6]] for row in reader]
     point_count = 0
     lasfile.user_data[:] = 0
+    lasfile.gps_time[:] = 0
     for voxel_index in lasfile.voxel_index:
         lasfile.olocation[point_count] = location_label[voxel_index][0]
         lasfile.mlocation[point_count] = location_label[voxel_index][1]
-        # user_data is corresponding to pole location
-        lasfile.user_data[point_count] = location_label[voxel_index][2]
+
         # classification is corresponding to fore or back ground
-        lasfile.raw_classification[point_count] = location_label[voxel_index][3]
+        lasfile.gps_time[point_count] = location_label[voxel_index][2]
+        lasfile.user_data[point_count] = location_label[voxel_index][3]
         #
-        lasfile.pt_src_id[point_count] = location_label[voxel_index][4]
         point_count += 1
     lasfile.close()
 
@@ -610,9 +867,10 @@ while loop:
     else:
         print("Please input a *.las file!!!")
 
-voxel_size = 0.1
+size_of_voxel = 0.2
+
 # minimun height of voxel to constitute a postion
-min_position_height = 1.0
+minimun_position_height = 1.0
 
 # poles are suposed to be lower than the max_height_of_pole
 max_height_of_pole = 15
@@ -623,11 +881,12 @@ cylinder_ratio = 0.95
 inner_radius = 0.6
 outer_radius = 1.4
 
+startheight = 0.1
 # the cylinder height radius to find foreground voxels
 cylinder_radius_for_foreground = 5
 cylinder_height_for_foreground = 12
 
-outlas = infilepath[:-4] + '_' + str(voxel_size) + '_' + str(int(min_position_height / voxel_size)) + '.las'
+outlas = infilepath[:-4] + '_' + str(size_of_voxel) + '_' + str(int(minimun_position_height / size_of_voxel)) + '.las'
 outcsv = outlas[:-4] + '.csv'
 outcsv1 = outlas[:-4] + '_1.csv'
 outcsv2 = outlas[:-4] + '_2.csv'
@@ -636,38 +895,37 @@ outcsv4 = outlas[:-4] + '_4.csv'
 outcsv5 = outlas[:-4] + '_5.csv'
 loop = True
 while loop:
-    x = raw_input("\n Step:")
-    if x == 'q':
+    user_input = raw_input("\n Step:")
+    if user_input == 'q':
         loop = False
-    elif x == '1':
+    elif user_input == '1':
         start = time.clock()
         add_dimension(infilepath, outlas, ["voxel_index", "olocation", "mlocation"], [5, 5, 3],
                       ["voxel num the point in", "original location label", "merged location label"])
         print "Step 1 costs seconds", time.clock() - start
-    elif x == '2':
+    elif user_input == '2':
         start = time.clock()
         voxelization(outlas, outcsv, 0.3)
         print "Step 2 costs seconds", time.clock() - start
 
-    elif x == '3':
+    elif user_input == '3':
         start = time.clock()
         original_localization(outcsv, outcsv1, 9)
         print "Step 3 costs seconds", time.clock() - start
-    elif x == '4':
+    elif user_input == '4':
         start = time.clock()
         merging_neighbor_location(outcsv1, outcsv2)
         print "Step 4 costs seconds", time.clock() - start
 
-    elif x == '6':
+    elif user_input == '6':
         start = time.clock()
-        remove_background(outcsv2, outcsv3, min_position_height, cylinder_radius_for_foreground,
-                          cylinder_height_for_foreground, voxel_size)
+        remove_background(outcsv2, outcsv3, fixed_radius=2, normal_threshold=0.86)
         print 'Step 6 costs', time.clock() - start
-    elif x == '7':
+    elif user_input == '7':
         start = time.clock()
-        connected_component_labeling(outcsv4, outcsv5)
+        connected_component_labeling(outcsv3, outcsv4)
         print 'Step 7 costs', time.clock() - start
-    elif x == '8':
+    elif user_input == '8':
         start = time.clock()
         label_points_location(outlas, outcsv5)
         print "Step 8 costs seconds", time.clock() - start
@@ -680,14 +938,14 @@ while loop:
         print "Step 1 costs seconds ", time.clock() - start
         start = time.clock()
 
-        print '\n 2.Voxelization...voxel size is %f m ' % voxel_size
-        voxelization(outlas, outcsv, voxel_size)
+        print '\n 2.Voxelization...voxel size is %f m ' % size_of_voxel
+        voxelization(outlas, outcsv, size_of_voxel)
         print "Step 2 costs seconds ", time.clock() - start
         start = time.clock()
 
         print '''\n 3.Detecting original position...
-        at least %d continuous vertical voxels constitute a location''' % int(min_position_height / voxel_size)
-        original_localization(outcsv, outcsv1, voxel_size, min_position_height)
+        at least %d continuous vertical voxels constitute a location''' % int(minimun_position_height / size_of_voxel)
+        original_localization(outcsv, outcsv1, size_of_voxel, minimun_position_height)
         print "Step 3 costs seconds", time.clock() - start
 
         print '''\n 4.Calculating merged position...'''
@@ -697,19 +955,13 @@ while loop:
 
         print '''\n 5.Removing background...'''
         start = time.clock()
-        remove_background(outcsv3, outcsv4, min_position_height, cylinder_radius_for_foreground,
-                          cylinder_height_for_foreground, voxel_size)
+        remove_background(outcsv2, outcsv3, fixed_radius=1, normal_threshold=0.6)
         print 'Step 5 costs', time.clock() - start
 
-        print '''\n 6.Connected component labeling...'''
+        print '''\n 6.Labeling points...'''
         start = time.clock()
-        connected_component_labeling(outcsv4, outcsv5)
-        print 'Step 6 costs', time.clock() - start
-
-        print '''\n 7.Labeling points...'''
-        start = time.clock()
-        label_points_location(outlas, outcsv5)
-        print "Step 7 costs seconds", time.clock() - start
+        label_points_location(outlas, outcsv3)
+        print "Step 6 costs seconds", time.clock() - start
         loop = False
 os.system('pause')
 
