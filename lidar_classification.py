@@ -5,11 +5,10 @@ import laspy
 import numpy as np
 import scipy.spatial
 import struct
-from osgeo import ogr
-from osgeo import gdal
 import liblas
 import time
 import os
+import csv
 # from matplotlib.mlab import PCA
 # import matplotlib.pyplot as plt
 
@@ -151,6 +150,8 @@ def readpolygonfromshp(shppath):
     http://blog.csdn.net/liminlu0314/article/details/8828983
     http://lab.osgeo.cn/1457.html
     """
+    from osgeo import ogr
+    from osgeo import gdal
     # 为了支持中文路径，请添加下面这句代码
     gdal.SetConfigOption("GDAL_FILENAME_IS_UTF8", "NO")
     # 为了使属性表字段支持中文，请添加下面这句
@@ -216,7 +217,7 @@ def getptinpolygon(infile, ptpolygon):
     for itemx, itemy in zip(infile.x, infile.y):  # 循环两个变量的方法
         ncross = 0
         i = 0
-        for item in ptpolygon:
+        for polygon in ptpolygon:
             p1 = ptpolygon[i]
             p2 = ptpolygon[(i + 1) % len(polygon)]
             i += 1
@@ -930,12 +931,12 @@ def voxelization(infile_path, outfile_path, voxel_size):
 
     # the array to store the point number in each voxel
     points_in_one_voxel_array = []
-
+    intensity_in_one_voxel_array = []
     while point_count < point_lengh - 1:
 
         # the counter of points number in one voxel
         points_in_one_voxel_count = 1
-
+        intensity_in_one_voxel_count = 0
         # loop of finding points with same code
         while point_count < point_lengh - 1 and \
                         scaled_x[indices[point_count + 1]] == scaled_x[indices[point_count]] and \
@@ -943,10 +944,13 @@ def voxelization(infile_path, outfile_path, voxel_size):
                         scaled_z[indices[point_count + 1]] == scaled_z[indices[point_count]]:
             # add a voxel index label to the point
             infile.voxel_index[indices[point_count]] = voxel_count
+            intensity_in_one_voxel_count += infile.intensity[indices[point_count]]
             point_count += 1
             points_in_one_voxel_count += 1
 
         infile.voxel_index[indices[point_count]] = voxel_count
+        intensity_in_one_voxel_count += infile.intensity[indices[point_count]]
+        intensity_in_one_voxel_array.append(intensity_in_one_voxel_count / points_in_one_voxel_count)
         points_in_one_voxel_array.append(points_in_one_voxel_count)
         # save the code to an array which later will be stored in the csv file
         code = "{:0>4d}".format(scaled_x[indices[point_count]]) + \
@@ -961,7 +965,7 @@ def voxelization(infile_path, outfile_path, voxel_size):
         writer = csv.writer(csvfile)
         count = 0
         while count < code_array_length:
-            writer.writerow([code_array[count], points_in_one_voxel_array[count]])
+            writer.writerow([code_array[count], points_in_one_voxel_array[count], intensity_in_one_voxel_array[count]])
             count += 1
 
 
@@ -984,12 +988,10 @@ def original_localization(csv_path, csv_out_path, voxel_size, min_position_heigh
     import csv
     with open(csv_path, 'rb') as in_csv_file:
         reader = csv.reader(in_csv_file)
-        line = [[row[0],row[1]] for row in reader]
-    voxel_code_array = np.array(line)[:,0]
-    points_count_array = np.array(line)[:,1]
-    # get rid of the '\n' in each array element
-    # cut_str_func = np.vectorize(get_partof_stringarray)
-    # voxel_code_array = cut_str_func(voxel_code_array, 12)
+        line = [[row[0], row[1], row[2]] for row in reader]
+    voxel_code_array = np.array(line)[:, 0]
+    points_count_array = np.array(line)[:, 1]
+    intensity_array = np.array(line)[:, 2]
 
     # parse the string array to integer array for later calculation
     voxel_code_int_array = np.vectorize(long)(voxel_code_array)
@@ -1045,7 +1047,8 @@ def original_localization(csv_path, csv_out_path, voxel_size, min_position_heigh
         csvwriter = csv.writer(out_csv_file)
         row = 0
         while row < length:
-            csvwriter.writerow([voxel_code_array[row], points_count_array[row], location_id_array[row]])
+            csvwriter.writerow([voxel_code_array[row], points_count_array[row], intensity_array[row],
+                                location_id_array[row]])
             row += 1
 
 
@@ -1063,10 +1066,11 @@ def merging_neighbor_location(csv_path, csv_out_path):
     import csv
     with open(csv_path, 'rb+') as in_csv_file:
         reader = csv.reader(in_csv_file)
-        line = [[row[0], row[1], row[2]] for row in reader]
+        line = [[row[0], row[1], row[2], row[3]] for row in reader]
     original_code_array = np.array(line)[:, 0]
     point_counts_array = np.array(line)[:, 1]
-    olocation_array = np.array(line)[:, 2]
+    intensity_array = np.array(line)[:, 2]
+    olocation_array = np.array(line)[:, 3]
 
     # get the first 8 char of the code list
     original_code_array_eight = np.array(map(lambda x: x[:8], original_code_array))
@@ -1147,11 +1151,12 @@ def merging_neighbor_location(csv_path, csv_out_path):
     with open(csv_out_path, 'wb') as out_csv_file:
         writer = csv.writer(out_csv_file)
         while row< length:
-            writer.writerow([original_code_array[row], point_counts_array[row], olocation_array[row], mlocation_all_array[row]])
+            writer.writerow([original_code_array[row], point_counts_array[row], intensity_array[row],
+                             olocation_array[row], mlocation_all_array[row]])
             row += 1
 
 
-def pole_part_detection(in_file, out_file, inner_radius, outer_radius, cyliner_height, ratio_threshold, voxel_size, max_height,):
+def pole_part_detection(in_file, out_file, inner_radius, outer_radius, cyliner_height, ratio_threshold, voxel_size, max_height):
     """
     detecting pole part of objects
 
@@ -1177,24 +1182,23 @@ def pole_part_detection(in_file, out_file, inner_radius, outer_radius, cyliner_h
     import csv
     with open(in_file, 'rb') as incsv:
         reader = csv.reader(incsv)
-        lines = [[row[0], row[1], row[2], row[3]] for row in reader]
+        lines = [[row[0], row[1], row[2], row[3], row[4]] for row in reader]
     original_code_array = np.array(lines)[:, 0]
     original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
     original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
     original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
     points_count_in_one_voxel = np.array(lines)[:, 1]
-
-    mlocation_array = np.array(lines)[:,3]
+    intensity_array = np.array(lines)[:, 2]
+    olocation_array = np.array(lines)[:, 3]
+    mlocation_array = np.array(lines)[:, 4]
     code_valid_array = original_code_array[mlocation_array != '0']
     mlocation_valid_array = mlocation_array[mlocation_array != '0']
-
-    olocation_array = np.array(lines)[:,2]
 
     # none-repetetive mlocation values
     mlocation_set = list(set(mlocation_valid_array))
 
     # pole number array to store all the voxel pole number, the value is 0 if it is not a pole
-    pole_number_array =np.array([0] * len(mlocation_array))
+    pole_number_array = np.array([0] * len(mlocation_array))
 
     pole_count = 1
 
@@ -1225,7 +1229,7 @@ def pole_part_detection(in_file, out_file, inner_radius, outer_radius, cyliner_h
         if z_int_array.max() - z_int_array.min() > max_height / voxel_size:
             continue
 
-        # finding neighbors, only eight-connected neighbors are taken into consideration
+        # finding neighbors, only six-connected neighbors are taken into consideration
 
         # finding the center of mlocation
         olocation_in_one_mlocation_array = olocation_array[one_mlocation_code_indices]
@@ -1278,19 +1282,9 @@ def pole_part_detection(in_file, out_file, inner_radius, outer_radius, cyliner_h
         writer = csv.writer(outcsv)
         row = 0
         while row < length:
-            writer.writerow([original_code_array[row], points_count_in_one_voxel[row], olocation_array[row],
-                             mlocation_array[row], pole_number_array[row]])
+            writer.writerow([original_code_array[row], points_count_in_one_voxel[row], intensity_array[row],
+                             olocation_array[row], mlocation_array[row], pole_number_array[row]])
             row += 1
-
-
-def pole_object_detection(in_file, out_fine, voxel_size):
-    """
-    detect the whole objects that has pole structure based on pole position
-
-    Args:
-        in_file: input csv file which has pole position information
-        out_file: output csv file which adds a column to store pole objects
-    """
 
 
 def remove_background(in_file, out_file, start_height, radius, max_height, voxel_size):
@@ -1305,17 +1299,17 @@ def remove_background(in_file, out_file, start_height, radius, max_height, voxel
     import csv
     with open(in_file, 'rb') as incsv:
         reader = csv.reader(incsv)
-        lines = [[row[0], row[1], row[2], row[3], row[4]] for row in reader]
+        lines = [[row[0], row[1], row[2], row[3], row[4], row[5]] for row in reader]
     original_code_array = np.array(lines)[:, 0]
     original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
     original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
     original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
 
-    point_counts_array = np.array(lines)[:,1]
-    olocation_array = np.array(lines)[:,2]
-    mlocation_array = np.array(lines)[:,3]
-    pole_id_array = np.array(lines)[:,4]
-
+    point_counts_array = np.array(lines)[:, 1]
+    intensity_array = np.array(lines)[:, 2]
+    olocation_array = np.array(lines)[:, 3]
+    mlocation_array = np.array(lines)[:, 4]
+    pole_id_array = np.array(lines)[:, 5]
     pole_location_set = list(set(pole_id_array[pole_id_array != '0']))
     foreground_indices = []
 
@@ -1344,8 +1338,9 @@ def remove_background(in_file, out_file, start_height, radius, max_height, voxel
     with open(out_file, 'wb') as outcsv:
         writer = csv.writer(outcsv)
         while count < length:
-            writer.writerow([original_code_array[count], point_counts_array[count], olocation_array[count],
-                             mlocation_array[count], pole_id_array[count], foreground_flag[count]])
+            writer.writerow([original_code_array[count], point_counts_array[count], intensity_array[count],
+                             olocation_array[count], mlocation_array[count], pole_id_array[count],
+                             foreground_flag[count]])
             count += 1
 
 
@@ -1359,15 +1354,16 @@ def connected_component_labeling(in_file, out_file):
     import csv
     with open(in_file) as incsv:
         reader = csv.reader(incsv)
-        lines = [[row[0], row[1], row[2], row[3], row[4], row[5]] for row in reader]
+        lines = [[row[0], row[1], row[2], row[3], row[4], row[5], row[6]] for row in reader]
 
     original_code_array = np.array(lines)[:, 0]
 
     point_counts_array = np.array(lines)[:, 1]
-    olocation_array = np.array(lines)[:, 2]
-    mlocation_array = np.array(lines)[:, 3]
-    pole_id_array = np.array(lines)[:, 4]
-    foreground_flag = np.array(lines)[:, 5]
+    intensity_array = np.array(lines)[:, 2]
+    olocation_array = np.array(lines)[:, 3]
+    mlocation_array = np.array(lines)[:, 4]
+    pole_id_array = np.array(lines)[:, 5]
+    foreground_flag = np.array(lines)[:, 6]
 
     foreground_indices = np.where(foreground_flag != '0')[0]
     x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array[foreground_indices]))
@@ -1439,9 +1435,129 @@ def connected_component_labeling(in_file, out_file):
     with open(out_file, 'wb') as outcsv:
         writer = csv.writer(outcsv)
         while count < voxel_length:
-            writer.writerow([original_code_array[count], point_counts_array[count], olocation_array[count],
-                             mlocation_array[count], pole_id_array[count], foreground_flag[count],
-                             all_label_array[count]])
+            writer.writerow([original_code_array[count], point_counts_array[count], intensity_array[count],
+                             olocation_array[count], mlocation_array[count], pole_id_array[count],
+                             foreground_flag[count], all_label_array[count]])
+            count += 1
+
+
+def min_cut(in_file, out_file):
+    """
+    segment the voxels in to n segments based on the position array using min cut algorithm
+
+    the original min cut algorithm comes from the paper:
+    "An Experimental Comparison of Min-Cut/Max-Flow Algorithms for Energy Minimization in Vision."Yuri Boykov and
+    Vladimir Kolmogorov. In IEEE Transactions on Pattern Analysis and Machine Intelligence (PAMI), September 2004
+
+    Args:
+        voxel_code_array: the voxels to be segmented
+        position_array: the position label of the voxels, the label could be more than 2
+    Return:
+
+    """
+    import maxflow
+    with open(in_file, 'rb') as incsv:
+        reader = csv.reader(incsv)
+        lines = [[row[0], row[1], row[2], row[3], row[4]] for row in reader]
+    original_code_array = np.array(lines)[:, 0]
+    original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
+    original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
+    original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
+
+    point_counts_array = np.array(lines)[:, 1]
+    olocation_array = np.array(lines)[:, 2]
+    mlocation_array = np.array(lines)[:, 3]
+    pole_id_array = np.array(lines)[:, 4]
+
+    pole_location_set = list(set(pole_id_array[pole_id_array != '0']))
+
+    voxel_length = len(voxel_code_array)
+    voxel_code_set = set(voxel_code_array)
+    reached_flag = [False] * voxel_length
+    voxel_count = 0
+
+    g = maxflow.GraphFloat()
+    nodes = g.add_nodes(voxel_length)
+
+    positions = position_array[position_array != '0']
+    unique_positions = list(set(positions))
+
+    first_positions = voxel_code_array[position_array == unique_positions[0]]
+    second_positions = voxel_code_array[position_array == unique_positions[1]]
+
+    center_x1 = int(first_positions[0][0:4])
+    center_y1 = int(first_positions[0][4:8])
+
+    center_x2 = int(second_positions[0][0:4])
+    center_y2 = int(second_positions[0][4:8])
+
+    distance = ((center_x1 - center_x2)**2 + (center_y1 - center_y2)**2)**0.5
+
+    for voxel_code in voxel_code_set:
+        center_x = int(voxel_code_array[voxel_count][0:4])
+        center_y = int(voxel_code_array[voxel_count][4:8])
+        d1 = ((center_x - center_x1)**2 + (center_y - center_y1)**2)**0.5
+        d2 = ((center_x - center_x2)**2 + (center_y - center_y2)**2)**0.5
+        g.add_tedge(nodes[voxel_count], d1 / 5, d2 / 5)
+        reached_flag[voxel_count] = True
+        right = "{:0>4d}".format(int(voxel_code[0:4]) + 1) + voxel_code[4:12]
+        left = "{:0>4d}".format(int(voxel_code[0:4]) - 1) + voxel_code[4:12]
+        front = "{:0>4d}".format(int(voxel_code[4:8]) - 1) + voxel_code[0:4] + voxel_code[8:12]
+        back = "{:0>4d}".format(int(voxel_code[4:8]) - 1) + voxel_code[0:4] + voxel_code[8:12]
+        up = "{:0>4d}".format(int(voxel_code[8:12]) + 1) + voxel_code[0:8]
+        down = "{:0>4d}".format(int(voxel_code[8:12]) - 1) + voxel_code[0:8]
+        neighbor_list = [right, left, front, back, up, down]
+        for neighbor in neighbor_list:
+            indice = np.where(np.array(voxel_code_array) == neighbor)
+            if len(indice) == 0:
+                continue
+            indice = indice[0][0]
+            if neighbor in voxel_code_set and reached_flag[indice] is False:
+                g.add_edge(nodes[voxel_count], nodes[indice], 1, 0)
+
+    flow = g.maxflow()
+    g.get_segment(nodes[3])
+
+
+def write_normal(in_file, out_file, fixed_radius):
+    import scipy
+    from scipy import linalg as la
+
+    with open(in_file, 'rb') as incsv:
+        reader = csv.reader(incsv)
+        lines = [[row[0], row[1], row[2], row[3], row[4]] for row in reader]
+    original_code_array = np.array(lines)[:, 0]
+    original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
+    original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
+    original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
+
+    point_counts_array = np.array(lines)[:, 1]
+    intensity_array = np.array(lines)[:, 2]
+    olocation_array = np.array(lines)[:, 3]
+    mlocation_array = np.array(lines)[:, 4]
+
+    normal_list = []
+    dataset = np.vstack([original_x_int_array, original_y_int_array, original_z_int_array]).transpose()
+    tree = scipy.spatial.cKDTree(dataset)
+    for x, y, z in zip(original_x_int_array, original_y_int_array, original_z_int_array):
+        indices = tree.query_ball_point([x, y, z], fixed_radius)
+        if len(indices) <= 3:
+            continue
+        idx = tuple(indices)
+        data = np.vstack([dataset[idx, 0], dataset[idx, 1], dataset[idx, 2]])
+        cov = np.cov(data)
+        evals, evects = la.eigh(cov)
+        evals = np.abs(evals)
+        index = evals.argsort()[::-1]
+        evects = evects[:, index]
+        normal_list.append(evects[2])
+    length = len(original_code_array)
+    count = 0
+    with open(out_file, 'wb') as out_csv:
+        writer = csv.writer(out_csv)
+        while count < length:
+            writer.writerow([original_code_array[count], point_counts_array[count], intensity_array[count],
+                             olocation_array[count], mlocation_array[count], normal_list[count]])
             count += 1
 
 
@@ -1515,7 +1631,7 @@ while loop:
     else:
         print("Please input a *.las file!!!")
 
-voxel_size = 0.2
+voxel_size = 0.25
 # minimun height of voxel to constitute a postion
 min_position_height = 1.0
 
@@ -1610,10 +1726,21 @@ while loop:
                        max_height_of_pole)
         print "Step 5 costs seconds", time.clock() - start
 
-        print '''\n 6.Labeling points...'''
+        print '''\n 6.Removing background...'''
         start = time.clock()
-        label_points_location(outlas, outcsv4)
-        print "Step 6 costs seconds", time.clock() - start
+        remove_background(outcsv3, outcsv4, min_position_height, cylinder_radius_for_foreground,
+                          cylinder_height_for_foreground, voxel_size)
+        print 'Step 6 costs', time.clock() - start
+
+        print '''\n 7.Connected component labeling...'''
+        start = time.clock()
+        connected_component_labeling(outcsv4, outcsv5)
+        print 'Step 7 costs', time.clock() - start
+
+        print '''\n 8.Labeling points...'''
+        start = time.clock()
+        label_points_location(outlas, outcsv5)
+        print "Step 8 costs seconds", time.clock() - start
         loop = False
 os.system('pause')
 
@@ -1733,7 +1860,7 @@ print "Done"
 测试分类
 
 infilepath = r"E:\class1.las"
-infile=laspy.file.File(infilepath,mode='rw')
+infile=laspy.file.File(infilepath, mode='rw')
 infile.red[:]=255
 infile.blue[:]=0
 infile.green[:]=0
