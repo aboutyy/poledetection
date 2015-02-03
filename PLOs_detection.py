@@ -233,10 +233,10 @@ def original_localization(voxel_code_array, voxel_size, min_position_height):
         #         voxel_count += 1
         #         change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
         #                       int(voxel_code_int_array[voxel_count - 1] / 10000)
-    return location_id_array
+    return np.array(olocation_indices_array)
 
 
-def merging_neighbor_location(original_code_array, olocation_array):
+def merging_neighbor_location(original_code_array, olocation_indices_array):
     """
     merge neighbor location to form the location of an object, each location is then corresponding to each object
 
@@ -249,80 +249,20 @@ def merging_neighbor_location(original_code_array, olocation_array):
     """
 
     # get the first 8 char of the code list
-    original_code_array_eight = np.array(map(lambda x: x[:8], original_code_array))
-
-    # only save the code that has be selected as an olocation
-    code_with_location_array = original_code_array_eight[olocation_array != 0]
-
-    # merged location counter
-    mlocation_count = 1
-
-    # remove the repetitive code in code_with_location_array
-    unique_location_code_array = list(set(code_with_location_array))
-    unique_location_code_array.sort(key=list(code_with_location_array).index)
-
-    unique_code_length = len(unique_location_code_array)
-    # each unique 8bit code correspond to a mloacation
-    mlocation_array = [0] * len(unique_location_code_array)
-    mlocation_array = np.array(mlocation_array)
-
-    flag_array = [False] * len(unique_location_code_array)
-    flag_array = np.array(flag_array)
-
-    x_array = map(lambda x: x[:4], unique_location_code_array)
-    y_array = map(lambda x: x[-4:], unique_location_code_array)
-    x_int_array = np.vectorize(int)(x_array)
-    y_int_array = np.vectorize(int)(y_array)
-
-    # the loop for finding all the merged locations
-    while False in flag_array:
-        idx = list(flag_array).index(False)
-        # the list to store
-        location_list = [idx]
-        new_location_list = location_list[:]
-        current_length = 0
-        # the loop for finding a merged location
-        while len(location_list) != current_length:
-            current_length = len(location_list)
-            # find the neighbors of the new_location member
-            neighbors_list = []
-            for item in new_location_list:
-                # find the neighbors of one code
-                x_valid = np.logical_and((x_int_array - x_int_array[item] < 2),(x_int_array - x_int_array[item] > -2))
-                y_valid = np.logical_and((y_int_array - y_int_array[item] < 2),(y_int_array - y_int_array[item] > -2))
-                neighbors = np.where(np.logical_and(x_valid, y_valid))
-                neighbors_list += list(neighbors[0])
-                neighbors_list = list(set(neighbors_list))
-            #     count = item + 1
-            #     neighbors = []
-            #     if count >= unique_code_length:
-            #         break
-            #     while count < unique_code_length - 1 and x_int_array[count] - x_int_array[item] < 2:
-            #         if y_int_array[count] - y_int_array[item] < 2:
-            #             neighbors.append(count)
-            #             count += 1
-            #         else:
-            #             count += 1
-            #     neighbors_list += neighbors
-            # # update new location list
-            new_location_list = []
-            for item in neighbors_list:
-                if item not in location_list:
-                    new_location_list.append(item)
-                    location_list.append(item)
-            # sort the new location to abandon the repetetive codes and to find neighbor just in one direction(right and
-            # downword)
-            # new_location_list.sort()
-        # when we find out all the olocations, we merge them to a mlocation
-        flag_array[location_list] = True
-        mlocation_array[location_list] = mlocation_count
-        mlocation_count += 1
-
-    mlocation_all_array =np.array([0] * len(original_code_array))
-    for code, mlocation in zip(unique_location_code_array, mlocation_array):
-        indices = np.logical_and((original_code_array_eight == code), (olocation_array != '0'))
-        mlocation_all_array[indices] = mlocation
-    return mlocation_all_array
+    x_list = []
+    y_list = []
+    for olocation_indices in olocation_indices_array:
+        x_list.append(int(original_code_array[olocation_indices[0]][0:4]))
+        y_list.append(int(original_code_array[olocation_indices[0]][4:8]))
+    dataset = np.vstack([x_list, y_list]).transpose()
+    merged_locations = two_dimensional_region_growing(dataset, 1.5)
+    mlocation_indices_array = []
+    for mlocations in merged_locations:
+        temp_mlocations = []
+        for mlocation in mlocations:
+            temp_mlocations += list(olocation_indices_array[mlocation])
+        mlocation_indices_array.append(temp_mlocations)
+    return mlocation_indices_array
 
 
 def connected_component_labeling(voxelset, radius):
@@ -376,6 +316,43 @@ def connected_component_labeling(voxelset, radius):
 def region_growing(voxelset, radius):
     # codes below were region growing algorithm implemented based pseudocode in
     # http://pointclouds.org/documentation/tutorials/region_growing_segmentation.php#region-growing-segmentation
+
+    tree = scipy.spatial.cKDTree(voxelset)
+    length = len(voxelset)
+    voxel_indices = range(length)
+    seed_length = len(voxel_indices)
+    # region list
+    regions = []
+    while seed_length > 0:
+        current_region_voxels = []
+        current_seeds = []
+        # voxel with lowest z value
+        lowest_voxel_indice = voxel_indices[0]
+        current_seeds.append(lowest_voxel_indice)
+        current_region_voxels.append(lowest_voxel_indice)
+        del voxel_indices[0]
+        count = 0
+        while count < len(current_seeds):
+            current_seed = current_seeds[count]
+            count += 1
+            current_seed_neighbors = \
+                tree.query_ball_point([voxelset[:, 0][current_seed], voxelset[:, 1][current_seed],
+                                        voxelset[:, 2][current_seed]], radius)
+            for neighbor in current_seed_neighbors:
+                if voxel_indices.count(neighbor) != 0:
+                        if current_region_voxels.count(neighbor) == 0:
+                            current_region_voxels.append(neighbor)
+                        voxel_indices.remove(neighbor)
+                        if current_seeds.count(neighbor) == 0:
+                            current_seeds.append(neighbor)
+        regions.append(np.array(current_region_voxels))
+        seed_length = len(voxel_indices)
+    return regions
+
+
+def two_dimensional_region_growing(voxelset, radius):
+    # codes below were region growing algorithm implemented based pseudocode in
+    # http://pointclouds.org/documentation/tutorials/region_growing_segmentation.php#region-growing-segmentation
     # awailable voxel list index
 
     tree1 = scipy.spatial.cKDTree(voxelset)
@@ -397,8 +374,7 @@ def region_growing(voxelset, radius):
             current_seed = current_seeds[count]
             count += 1
             current_seed_neighbors = \
-                tree1.query_ball_point([voxelset[:, 0][current_seed], voxelset[:, 1][current_seed],
-                                        voxelset[:, 2][current_seed]], radius)
+                tree1.query_ball_point([voxelset[:, 0][current_seed], voxelset[:, 1][current_seed]], radius)
             for neighbor in current_seed_neighbors:
                 if voxel_indices.count(neighbor) != 0:
                         if current_region_voxels.count(neighbor) == 0:
@@ -411,7 +387,7 @@ def region_growing(voxelset, radius):
     return regions
 
 
-def remove_background(original_code_array, mlocation_array, fixed_radius, normal_threshold):
+def remove_background(original_code_array, mlocation_array, radius, normal_threshold):
     """
     romove the back ground based on the vertical continuous height of each x,y on xy plane
 
@@ -426,7 +402,7 @@ def remove_background(original_code_array, mlocation_array, fixed_radius, normal
     dataset = np.vstack([original_x_int_array, original_y_int_array, original_z_int_array]).transpose()
     tree = scipy.spatial.cKDTree(dataset)
     for x, y, z in zip(original_x_int_array, original_y_int_array, original_z_int_array):
-        indices = tree.query_ball_point([x, y, z], fixed_radius)
+        indices = tree.query_ball_point([x, y, z], radius)
         if len(indices) <= 3:
             normal_list.append(0)
             continue
@@ -443,39 +419,35 @@ def remove_background(original_code_array, mlocation_array, fixed_radius, normal
     # codes below were region growing algorithm implemented based pseudocode in
     # http://pointclouds.org/documentation/tutorials/region_growing_segmentation.php#region-growing-segmentation
     # awailable voxel list index
-    seeds1 = np.logical_or(np.array(normal_list) > normal_threshold, np.array(normal_list) < -normal_threshold)
-    seeds2 = np.logical_and(np.array(mlocation_array) == 0, np.array(mlocation_array) == 0)
-    seeds = np.where(seeds1 & seeds2)[0]
-    # seeds = original_z_int_array[seeds].argsort()
-    seeds = list(seeds)
+    seeds = np.logical_or(np.array(normal_list) > normal_threshold, np.array(normal_list) < -normal_threshold)
+
+    seeds = list(np.where(seeds)[0])
+    # 背景点中不能包含mlocation点
+    for mlocations in mlocation_array:
+        for voxel in mlocations:
+            if voxel in seeds:
+                seeds.remove(voxel)
     voxel_set = np.vstack([original_x_int_array[seeds], original_y_int_array[seeds],
                           original_z_int_array[seeds]]).transpose()
     regions = region_growing(voxel_set, 1.5)
-    # regions = connected_component_labeling(voxel_set, 1.5)
-    ground_list = [0] * length
-    region_count = 1
+
+    seeds = np.array(seeds)
+    ground = []
     for region in regions:
-        if float(len(region))/length < 0.1:
+        if float(len(region)) / length < 0.1:
             continue
         else:
-            for indice in region:
-                ground_list[seeds[indice]] = region_count
-    # ground = []
-    # for region in regions:
-    #     if float(len(region)) / length < 0.1:
-    #         continue
-    #     else:
-    #         for indice in region:
-    #             ground.append(seeds[indice])
-    return normal_list, ground_list
+            ground.append(seeds[region])
+    return normal_list, ground
 
 
-def pole_position_detection(points_count_in_one_voxel_array, original_code_array, olocation_array, mlocation_array,
-                            inner_radius, outer_radius, cyliner_height, ratio_threshold, voxel_size,
-                            max_height):
+def pole_position_detection_by_fixed_inner_radius(points_count_in_one_voxel_array, original_code_array,
+                                                  mlocation_indices_array, ground_indices, inner_radius, outer_radius,
+                                                  cyliner_height, ratio_threshold, voxel_size,max_height):
     """
-    detecting pole part of objects
+    利用双圆柱模型，从mlocation中筛选出属于pole的position
 
+    这里用的双圆柱的内圆柱大小为固定大小--inner_radius
     We define three rules to detecing poles:
     1. The radius of the merged location should be less than a threshold, this is calculated by r/voxelsize
     2. The ratio between the merged location and sum of the merged location and their neigborsshould be higher than a
@@ -496,91 +468,207 @@ def pole_position_detection(points_count_in_one_voxel_array, original_code_array
         None
     """
 
+    fore_ground_indices = range(len(points_count_in_one_voxel_array))
+    ground_list = []
+    for ground_region in ground_indices:
+        ground_list += list(ground_region)
+    ground_list.sort(cmp=None, key=None, reverse=True)
+    for indice in ground_list:
+        del fore_ground_indices[indice]
+
+    fore_ground_indices = np.array(fore_ground_indices)
+
     original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
     original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
     original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
 
-    mlocation_valid_array = mlocation_array[mlocation_array != 0]
+    # 建立KD树
+    dataset = np.vstack([original_x_int_array[fore_ground_indices], original_y_int_array[fore_ground_indices],
+                         original_z_int_array[fore_ground_indices]]).transpose()
+    tree = scipy.spatial.cKDTree(dataset)
+    # 存储杆位置的索引号，每个元素对应一个杆的位置
+    pole_indices_array = []
+    # 圆柱高度对应的voxe个数
+    voxel_cylinder_height = int(cyliner_height / voxel_size)
 
-    # none-repetetive mlocation values
-    mlocation_set = list(set(mlocation_valid_array))
+    # 计算内圈，外圈的voxel的相邻个数
+    voxel_inner_radius = int(inner_radius / voxel_size + 0.5) * 2**0.5
+    voxel_outer_radius = int(outer_radius / voxel_size + 0.5) * 2**0.5
 
-    # pole number array to store all the voxel pole number, the value is 0 if it is not a pole
-    pole_number_array = np.array([0] * len(mlocation_array))
-
-    pole_count = 1
+    # 外切球半径: 圆柱中心点与圆柱底边圆上点的距离
+    query_radius = int((voxel_outer_radius**2 + (voxel_cylinder_height/2)**2)**0.5 + 0.5)
 
     # loop of traversing all the mlocations
-    for mlocation in mlocation_set:
-        # all the indices in one mlocation
-        one_mlocation_code_indices = np.where(mlocation_array == mlocation)
-        one_mlocation_code_indices = list(one_mlocation_code_indices[0])
+    for one_mlocation_indices in mlocation_indices_array:
+        x_int_array = original_x_int_array[one_mlocation_indices]
+        y_int_array = original_y_int_array[one_mlocation_indices]
+        z_int_array = original_z_int_array[one_mlocation_indices]
 
-        # all the codes of one mlocation
-        one_mlocation_code_array = original_code_array[one_mlocation_code_indices]
-
-        x_int_array = np.vectorize(int)(map(lambda x: x[:4], one_mlocation_code_array))
-        y_int_array = np.vectorize(int)(map(lambda x: x[4:8], one_mlocation_code_array))
-        z_int_array = np.vectorize(int)(map(lambda x: x[8:12], one_mlocation_code_array))
-
-        # counter for calculating the number of voxel the perform the cylinder analysis, we declude the lowest voxel
-        vertical_count = int(cyliner_height / voxel_size) + 1
 
         # selecte codes under a height threshold in one mlocation
         minz = min(z_int_array)
-
-        # judge if the mlocation satisfy rule 1
-        # if x_int_array.max() - x_int_array.min() > inner_radius / voxel_size \
-        #         or y_int_array.max() - y_int_array.min() >= inner_radius /voxel_size \
-        #         or z_int_array.max() - z_int_array.min() > max_height / voxel_size:
-        #     continue
+        minx = min(x_int_array)
+        maxx = max(x_int_array)
+        miny = min(y_int_array)
+        maxy = max(y_int_array)
+        location_radius = 0.5 * ((maxx - minx)**2 + (maxy - miny)**2)**0.5
+        # 如果位置点太大则不属于杆状物
+        if location_radius > 4:
+            continue
+        # 高于一定阈值，则不能判定为杆子
         if z_int_array.max() - z_int_array.min() > max_height / voxel_size:
             continue
 
-        # finding neighbors, only six-connected neighbors are taken into consideration
-
         # finding the center of mlocation
-        olocation_in_one_mlocation_array = olocation_array[one_mlocation_code_indices]
-        from collections import Counter
-        counts = Counter(olocation_in_one_mlocation_array)
-        top_olocation = counts.most_common(1)[0][0]
-        center_x = x_int_array[olocation_in_one_mlocation_array == top_olocation][0]
-        center_y = y_int_array[olocation_in_one_mlocation_array == top_olocation][0]
+        center_x = int(sum(x_int_array) / float(len(x_int_array)) + 0.5)
+        center_y = int(sum(y_int_array) / float(len(y_int_array)) + 0.5)
 
-        # 计算内圈，外圈的voxel的相邻个数,比如（0.6，1）对应（1，2）；（0.8，1.4）对应（2，4)
-        inner_radius_count = (int(inner_radius / voxel_size + 0.5)) / 2
-        outer_radius_count = (int((outer_radius - inner_radius) / voxel_size) + 1) / 2 + inner_radius_count
-        in_x_valid = np.logical_and(original_x_int_array - center_x >= -inner_radius_count,
-                                    original_x_int_array - center_x <= inner_radius_count)
-        out_x_valid1 = np.logical_and(outer_radius_count >= original_x_int_array - center_x,
-                                      original_x_int_array - center_x > inner_radius_count)
-        out_x_valid2 = np.logical_and(-outer_radius_count <= original_x_int_array - center_x,
-                                      original_x_int_array - center_x < -inner_radius_count)
-        out_x_valid = out_x_valid1 | out_x_valid2
-        in_y_valid = np.logical_and(original_y_int_array - center_y >= -inner_radius_count,
-                                    original_y_int_array - center_y <= inner_radius_count)
-        out_y_valid1 = np.logical_and(outer_radius_count >= original_y_int_array - center_y,
-                                      original_y_int_array - center_y > inner_radius_count)
-        out_y_valid2 = np.logical_and(-outer_radius_count <= original_y_int_array - center_y,
-                                      original_y_int_array - center_y < -inner_radius_count)
-        z_valid = np.logical_and(original_z_int_array > minz + 1, original_z_int_array < minz + vertical_count + 1)
-        out_y_valid = out_y_valid1 | out_y_valid2
-        in_voxels = np.where(in_x_valid & in_y_valid & z_valid)
-        out_voxels = np.where(out_x_valid & out_y_valid & z_valid)
-        outer_voxel_list = list(out_voxels[0])
-        inner_voxel_list = list(in_voxels[0])
+        # 为了提高速度，先计算圆柱所在大球内所有的voxel
+        temp_indices = tree.query_ball_point([center_x, center_y, minz + 0.5 * cylinder_height / voxel_size],
+                                             query_radius)
 
-        # mlocation_points_count = sum(np.vectorize(int)(points_count_in_one_voxel[cylinder_indices]))
-        if len(outer_voxel_list) == 0:
-            outer_point_count = 0
+        # 计算球内位于小圆柱内的voxel
+        temp_indices = np.array(temp_indices)
+        in_voxels_flag1 = np.logical_and(original_z_int_array[fore_ground_indices[temp_indices]] >= minz,
+                                         original_z_int_array[fore_ground_indices[temp_indices]] <= minz +
+                                         voxel_cylinder_height)
+        temp_distances = ((original_x_int_array[fore_ground_indices[temp_indices]] - center_x)**2 +
+                               (original_y_int_array[fore_ground_indices[temp_indices]] - center_y)**2)**0.5
+        in_voxels = np.where((temp_distances <= voxel_inner_radius) &
+                             (original_z_int_array[fore_ground_indices[temp_indices]] >= minz) &
+                             (original_z_int_array[fore_ground_indices[temp_indices]] <= minz + voxel_cylinder_height))[0]
+        # 计算位于大圆柱内的voxel
+        in_and_out_voxels = np.where((temp_distances <= voxel_outer_radius) &
+                                     (original_z_int_array[fore_ground_indices[temp_indices]] >= minz) &
+                                     (original_z_int_array[fore_ground_indices[temp_indices]] <=
+                                      minz + voxel_cylinder_height))[0]
+        in_point_count = sum(points_count_in_one_voxel_array[fore_ground_indices[temp_indices[in_voxels]]])
+        in_and_out_point_count = sum(points_count_in_one_voxel_array[fore_ground_indices[temp_indices[in_and_out_voxels]]])
+        # 计算内圆柱内点个数占大圆柱内点个数的比例
+        if in_point_count / float(in_and_out_point_count) >= ratio_threshold:
+            pole_indices_array.append(one_mlocation_indices)
         else:
-            outer_point_count = sum(np.vectorize(int)(points_count_in_one_voxel_array[outer_voxel_list]))
+            continue
+        # else:
+        #     outer_point_count = sum(np.vectorize(int)(points_count_in_one_voxel_array[outer_voxel_list]))
+        # inner_point_count = sum(np.vectorize(int)(points_count_in_one_voxel_array[inner_voxel_list]))
+        # if float(inner_point_count) / (inner_point_count + outer_point_count) > ratio_threshold:
+        #     pole_indices_array.append(one_mlocation_indices)
+    return np.array(pole_indices_array)
 
-        inner_point_count = sum(np.vectorize(int)(points_count_in_one_voxel_array[inner_voxel_list]))
-        if float(inner_point_count) / (inner_point_count + outer_point_count) > ratio_threshold:
-            pole_number_array[inner_voxel_list] = pole_count
-            pole_count += 1
-    return pole_number_array
+
+def pole_position_detection_by_mlocation_radius(points_count_in_one_voxel_array, original_code_array,
+                                                  mlocation_indices_array, ground_indices, cyliner_height,
+                                                  ratio_threshold, voxel_size,max_height):
+    """
+    利用双圆柱模型，从mlocation中筛选出属于pole的position
+
+    这里用的双圆柱的内圆柱大小为mlocation外包框的大小
+    We define three rules to detecing poles:
+    1. The radius of the merged location should be less than a threshold, this is calculated by r/voxelsize
+    2. The ratio between the merged location and sum of the merged location and their neigborsshould be higher than a
+    threshold
+    3. The merged lcoation should be higher than some threshold(this has been refined in the olocation detection step)
+
+    Args:
+        in_file: the csv file which has code and merged location column
+        out_file: the csv file which added the pole label information
+        inner_radius: the inner radius when applying isolation analysis using the double cylinder model
+        outer_radius: the outer radius when applying isolation analysis using the double cylinder model
+        ratio_threshold: the ratio of the points in the out ring and in the inner ring of the double cylinder model
+        voxel_size:
+        cylinder_height: only points within this from bottom of mlocation will be used to perform the double cylinder
+        analysis
+        max_height: height threshold of pole like objects
+    Return:
+        None
+    """
+    fore_ground_indices = range(len(points_count_in_one_voxel_array))
+    ground_list = []
+    for ground_region in ground_indices:
+        ground_list += list(ground_region)
+    ground_list.sort(cmp=None, key=None, reverse=True)
+    for indice in ground_list:
+        del fore_ground_indices[indice]
+
+    fore_ground_indices = np.array(fore_ground_indices)
+
+    original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
+    original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
+    original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
+
+    # 建立KD树
+    dataset = np.vstack([original_x_int_array[fore_ground_indices], original_y_int_array[fore_ground_indices],
+                         original_z_int_array[fore_ground_indices]]).transpose()
+    tree = scipy.spatial.cKDTree(dataset)
+    # 存储杆位置的索引号，每个元素对应一个杆的位置
+    pole_indices_array = []
+    # 圆柱高度对应的voxe个数
+    voxel_cylinder_height = int(cyliner_height / voxel_size)
+
+    # loop of traversing all the mlocations
+    for one_mlocation_indices in mlocation_indices_array:
+        x_int_array = original_x_int_array[one_mlocation_indices]
+        y_int_array = original_y_int_array[one_mlocation_indices]
+        z_int_array = original_z_int_array[one_mlocation_indices]
+
+
+        # selecte codes under a height threshold in one mlocation
+        minz = min(z_int_array)
+        minx = min(x_int_array)
+        maxx = max(x_int_array)
+        miny = min(y_int_array)
+        maxy = max(y_int_array)
+        location_radius = 0.5 * ((maxx - minx)**2 + (maxy - miny)**2)**0.5
+        # 如果位置点太大则不属于杆状物
+        if location_radius > 4:
+            continue
+        # 高于一定阈值，则不能判定为杆子
+        if z_int_array.max() - z_int_array.min() > max_height / voxel_size:
+            continue
+
+        # 定义进行双圆柱分析的内外圆柱半径
+        voxel_inner_radius = location_radius
+        voxel_outer_radius = location_radius + 1
+
+        # 外切球半径: 圆柱中心点与圆柱底边圆上点的距离
+        query_radius = int((voxel_outer_radius**2 + (voxel_cylinder_height/2)**2)**0.5 + 0.5)
+        # 找到mlocation的中心点，实际为外包框的中心点
+        center_x = 0.5 * (maxx + minx)
+        center_y = 0.5 * (maxy + miny)
+
+        # 为了提高速度，先计算圆柱所在大球内所有的voxel
+        temp_indices = tree.query_ball_point([center_x, center_y, minz + 0.5 * cylinder_height / voxel_size],
+                                             query_radius)
+
+        # 计算球内位于小圆柱内的voxel
+        temp_indices = np.array(temp_indices)
+        in_voxels_flag1 = np.logical_and(original_z_int_array[fore_ground_indices[temp_indices]] >= minz,
+                                         original_z_int_array[fore_ground_indices[temp_indices]] <= minz +
+                                         voxel_cylinder_height)
+        temp_distances = ((original_x_int_array[fore_ground_indices[temp_indices]] - center_x)**2 +
+                               (original_y_int_array[fore_ground_indices[temp_indices]] - center_y)**2)**0.5
+        in_voxels = np.where((temp_distances <= voxel_inner_radius) &
+                             (original_z_int_array[fore_ground_indices[temp_indices]] >= minz) &
+                             (original_z_int_array[fore_ground_indices[temp_indices]] <= minz + voxel_cylinder_height))[0]
+        # 计算位于大圆柱内的voxel
+        in_and_out_voxels = np.where((temp_distances <= voxel_outer_radius) &
+                                     (original_z_int_array[fore_ground_indices[temp_indices]] >= minz) &
+                                     (original_z_int_array[fore_ground_indices[temp_indices]] <=
+                                      minz + voxel_cylinder_height))[0]
+        in_point_count = sum(points_count_in_one_voxel_array[fore_ground_indices[temp_indices[in_voxels]]])
+        in_and_out_point_count = sum(points_count_in_one_voxel_array[fore_ground_indices[temp_indices[in_and_out_voxels]]])
+        # 计算内圆柱内点个数占大圆柱内点个数的比例
+        if in_point_count / float(in_and_out_point_count) >= ratio_threshold:
+            pole_indices_array.append(one_mlocation_indices)
+        else:
+            continue
+        # else:
+        #     outer_point_count = sum(np.vectorize(int)(points_count_in_one_voxel_array[outer_voxel_list]))
+        # inner_point_count = sum(np.vectorize(int)(points_count_in_one_voxel_array[inner_voxel_list]))
+        # if float(inner_point_count) / (inner_point_count + outer_point_count) > ratio_threshold:
+        #     pole_indices_array.append(one_mlocation_indices)
+    return np.array(pole_indices_array)
 
 
 def get_foot_point(startx, starty, endx, endy, x, y):
@@ -591,7 +679,8 @@ def get_foot_point(startx, starty, endx, endy, x, y):
     return footx, footy
 
 
-def min_cut(voxel_code_array, intensity_array, points_count_array, mlocation_array, ground_array, pole_position_array):
+def min_cut(center_x, center_y, pole_position_dataset, voxel_set, intensity_array, points_count_array, neighbor_count,
+            distance_threshold, radius):
     """
     segment the voxels in to n segments based on the position array using min cut algorithm
 
@@ -600,8 +689,14 @@ def min_cut(voxel_code_array, intensity_array, points_count_array, mlocation_arr
     Vladimir Kolmogorov. In IEEE Transactions on Pattern Analysis and Machine Intelligence (PAMI), September 2004
 
     Args:
-        voxel_code_array: the voxels to be segmented
-        position_array: the position label of the voxels, the label could be more than 2
+        center_x,center_y: 指定的前景点的中心
+        pole_indices: 前景点的index
+        voxel_set： 待分割的voxel集合
+        intensity_array： 每个voxel对应的强度值
+        points_count_array： 每个voxel 对应的voxel包含的点数
+        neighbor_count：建立graph时邻居点的个数
+        distance_threshold：只计算规定距离范围内的voxel来构造graph
+        radius：默认的pole的最大半径，半径外的点被认为是背景点
     Return:
 
     """
@@ -609,128 +704,256 @@ def min_cut(voxel_code_array, intensity_array, points_count_array, mlocation_arr
     import maxflow
     import math
     k = 3.40282e+038
-    fore_ground_indices = np.where(ground_array != 0)[0]
-    voxel_length = len(fore_ground_indices)
-    reached_flag = [False] * voxel_length
-    voxel_count = 0
-    fore_voxel_code_array = voxel_code_array[fore_ground_indices]
-    fore_intensity_array = intensity_array[fore_ground_indices]
-    fore_points_count_array = points_count_array[fore_ground_indices]
-    fore_pole_position_array = pole_position_array[fore_ground_indices]
-    intensity_var = np.var(np.vectorize(int)(fore_intensity_array))
-    point_count_var = np.var(np.vectorize(int)(fore_points_count_array))
+    voxel_length = len(voxel_set)
+    tree = scipy.spatial.cKDTree(voxel_set)
+    intensity_var = np.var(np.vectorize(int)(intensity_array))
+    point_count_var = np.var(np.vectorize(int)(points_count_array))
     g = maxflow.GraphFloat()
     nodes = g.add_nodes(voxel_length)
 
-    positions = fore_pole_position_array[fore_pole_position_array != 0]
-    unique_positions = list(set(positions))
-    pole_position_number = 1
-
-    first_positions = fore_voxel_code_array[fore_pole_position_array == unique_positions[0]]
-    second_positions = fore_voxel_code_array[fore_pole_position_array == unique_positions[1]]
-
-    center_x1 = int(first_positions[0][0:4])
-    center_y1 = int(first_positions[0][4:8])
-
-    center_x2 = int(second_positions[0][0:4])
-    center_y2 = int(second_positions[0][4:8])
-
-    distance = ((center_x1 - center_x2)**2 + (center_y1 - center_y2)**2)**0.5
-
-    while voxel_count < voxel_length:
-        center_x = int(fore_voxel_code_array[voxel_count][0:4])
-        center_y = int(fore_voxel_code_array[voxel_count][4:8])
-        foot_x, foot_y = get_foot_point(center_x1, center_y1, center_x2, center_y2, center_x, center_y)
-        # d1 = ((center_x - center_x1)**2 + (center_y - center_y1)**2)**0.5
-        # d2 = ((center_x - center_x2)**2 + (center_y - center_y2)**2)**0.5
-        d1 = ((foot_x - center_x1)**2 + (foot_y - center_y1)**2)**0.5
-        d2 = ((foot_x - center_x2)**2 + (foot_y - center_y2)**2)**0.5
-
-        v = (foot_x - center_x1) * (foot_x - center_x2) + (foot_y - center_y1) * (foot_y - center_y2)
-
-        # hard constraint
-        if fore_voxel_code_array[voxel_count] in first_positions:
-            g.add_tedge(nodes[voxel_count], k, 0)
-        elif fore_voxel_code_array[voxel_count] in second_positions:
-            g.add_tedge(nodes[voxel_count], 0, k)
-        elif v >= 0:
-            if d1 > d2:
-                g.add_tedge(nodes[voxel_count], 0, k)
-            else:
-                g.add_tedge(nodes[voxel_count], k, 0)
+    # 求所有距离的方差
+    distances, neighbors = tree.query(voxel_set, k=neighbor_count, eps=0, p=2, distance_upper_bound=distance_threshold)
+    distance_all_array = []
+    for distance_array in distances:
+        for distance in distance_array:
+            if 0 < distance <= distance_threshold:
+                distance_all_array.append(distance)
+    distance_var = np.var(distance_all_array)
+    voxel_count = 0
+    # 遍历每一个voxel 建立对应的graph
+    for distance_list, neighbor_list in zip(distances, neighbors):
+        distance_to_center = ((voxel_set[voxel_count][0] - center_x) ** 2
+                              + (voxel_set[voxel_count][1] - center_y) ** 2) ** 0.5
+        # 添加区域权重，根据与杆中心点的位置确定 Rp(1) = -ln Pr(Ip|’obj’)； Rp(0) = -ln Pr(Ip|’bkg’)
+        if any(np.equal(pole_position_dataset, voxel_set[voxel_count]).all(1)) or distance_to_center == 0:
+            g.add_tedge(voxel_count, k, 0)
+        elif distance_to_center >= radius:
+            g.add_tedge(voxel_count, 0, k)
         else:
-            g.add_tedge(nodes[voxel_count], -math.log(d1 / distance)*0.02, -math.log(d2 / distance)*0.02)
+            g.add_tedge(voxel_count, -math.log(distance_to_center / radius), -math.log(1 - distance_to_center / radius))
 
-
-        reached_flag[voxel_count] = True
-        right = "{:0>4d}".format(int(fore_voxel_code_array[voxel_count][0:4]) + 1) + fore_voxel_code_array[voxel_count][4:12]
-        left = "{:0>4d}".format(int(fore_voxel_code_array[voxel_count][0:4]) - 1) + fore_voxel_code_array[voxel_count][4:12]
-        front = fore_voxel_code_array[voxel_count][0:4] + "{:0>4d}".format(int(fore_voxel_code_array[voxel_count][4:8]) + 1) +\
-                fore_voxel_code_array[voxel_count][8:12]
-        back = fore_voxel_code_array[voxel_count][0:4] + "{:0>4d}".format(int(fore_voxel_code_array[voxel_count][4:8]) - 1) +\
-               fore_voxel_code_array[voxel_count][8:12]
-        up = fore_voxel_code_array[voxel_count][0:8] + "{:0>4d}".format(int(fore_voxel_code_array[voxel_count][8:12]) + 1)
-        down = fore_voxel_code_array[voxel_count][0:8] + "{:0>4d}".format(int(fore_voxel_code_array[voxel_count][8:12]) - 1)
-        neighbor_list = [right, left, front, back, up, down]
-        for neighbor in neighbor_list:
-            indice = np.where(np.array(fore_voxel_code_array) == neighbor)
-            if len(indice[0]) == 0:
+        for neighbor, distance in zip(neighbor_list, distance_list):
+            # 因为返回的邻居点包含原本点，需要去除掉.如果距离过大也不建立graph
+            if neighbor == voxel_count or distance > 3:
                 continue
-            indice = indice[0][0]
-            if reached_flag[indice] is False:
-                intensity_dif = math.fabs(int(fore_intensity_array[indice]) - int(fore_intensity_array[voxel_count]))
-                point_count_dif = math.fabs(int(fore_ground_indices[indice]) - int(fore_ground_indices[voxel_count]))
-                smoothcost = math.exp(-point_count_dif**2 / (2 * point_count_var))
-                g.add_edge(nodes[voxel_count], nodes[indice], smoothcost, smoothcost)
+            point_count_dif = (points_count_array[voxel_count] - points_count_array[neighbor]) ** 2
+            # intensity_dif = (intensity_array[voxel_count] - intensity_array[neighbor]) ** 2
+            # 计算两个voxel的差异
+            # voxel_dif = 0.5 * distance / distance_var + 0.25 * point_count_dif / point_count_var \
+            #             + 0.25 * intensity_dif / intensity_var
+            voxel_dif = distance ** 2 / 2
+            # smoothcost = math.exp(-voxel_dif)
+            smoothcost = math.exp(-point_count_dif**2 / (2 * point_count_var))
+            g.add_edge(voxel_count, neighbor, smoothcost, 0)
         voxel_count += 1
-    flow = g.maxflow()
-    return map(g.get_segment, nodes)
+    g.maxflow()
+    results = np.array(map(g.get_segment, nodes))
+    poles = np.where(results == 1)[0]
+    return poles
 
 
-def pole_segmentation(points_count_array, voxel_code_array, olocation_array, mlocation_array, ground_array):
-    seeds = mlocation_array[mlocation_array != 0]
+def region_growing_by_seeds(voxelset, seeds_array, distance_threshold):
+    """
+    返回seeds_array中数组大小对应个数的块，index与整个voxel一一对应
+    """
+    tree = scipy.spatial.cKDTree(voxelset)
+    reached_flag = np.array([False] * len(voxelset))
+    # 存储对应每一组seeds的区域的集合
+    regions = []
+    # 遍历所有种子点组，求出对应的区域
+    for seeds in seeds_array:
+        # new_seeds存储新加入的需要计算邻居点的点
+        if reached_flag[seeds[0]] == True:
+            continue
+        new_seeds = []
+        new_seeds += seeds
+        # 记录seeds对应的增长区域
+        region = []
+        region += new_seeds
+        # 通过计算心加入种子点的邻居点来增长区域，直到没有新种子点加入为止
+        while len(new_seeds) > 0:
+            current_seed_neighbors = tree.query_ball_point(voxelset[new_seeds], distance_threshold)
+            new_seeds = []
+            for neighbors in current_seed_neighbors:
+                for neighbor in neighbors:
+                    if region.count(neighbor) == 0:
+                        region.append(neighbor)
+                        new_seeds.append(neighbor)
+            # 默认太大的物体不是杆状物
+            if len(region) > 1000:
+                break
+        reached_flag[region] = True
+        regions.append(np.array(region))
+    # 返回的是对应所有voxel的索引
+    return regions
+
+
+def count_mlocations(region_voxels, mlocation_indices_array):
+    """
+    计算块中包含几个mlocations
+    """
+    count = 0
+    for mlocations in mlocation_indices_array:
+        for voxel in mlocations:
+            if voxel in region_voxels:
+                count += 1
+                break
+    return count
+
+
+def pole_segmentation(points_count_array, intensity_array,  voxel_code_array, mlocation_indices_array, ground_array,
+                      pole_position_array):
+    """
+    implement the min cut algorithm in http://pmneila.github.io/PyMaxflow/index.html#
+    """
+    # K in the article
+    # all_indices = range(len(points_count_array))
+
     poles_array = []
+    fore_ground_indices = range(len(voxel_code_array))
+    ground_indices = []
+    for ground_region in ground_array:
+        ground_indices += list(ground_region)
+    ground_indices.sort(cmp=None, key=None, reverse=True)
+    for indice in ground_indices:
+        del fore_ground_indices[indice]
 
-    return poles_array
+    fore_ground_indices = np.array(fore_ground_indices)
+    x_int_array = np.vectorize(int)(map(lambda x: x[:4], voxel_code_array))
+    y_int_array = np.vectorize(int)(map(lambda x: x[4:8], voxel_code_array))
+    z_int_array = np.vectorize(int)(map(lambda x: x[8:12], voxel_code_array))
+
+    voxel_set = np.vstack([x_int_array, y_int_array, z_int_array]).transpose()
+    # 求出每一个pole location对应的块(一一对应)，如果包含>1个的mlocation则进行graph cut操作
+
+    # 存储前景点对应的pole位置点的index
+    pole_seeds_list = []
+    for pole_position in pole_position_array:
+        temp_seed_list = []
+        for voxel in pole_position:
+            temp_seed_list.append(np.where(fore_ground_indices == voxel)[0][0])
+        pole_seeds_list.append(temp_seed_list)
+    regions = region_growing_by_seeds(voxel_set[fore_ground_indices], pole_seeds_list, 1.8)
+
+    # for region, pole_position in zip(regions, pole_seeds_list):
+    #     # 存储一个pole的位置
+    #     center_x = sum(x_int_array[fore_ground_indices[pole_position]]) / len(pole_position)
+    #     center_y = sum(y_int_array[fore_ground_indices[pole_position]]) / len(pole_position)
+    #     region_dataset = voxel_set[fore_ground_indices[region]]
+    #     mlocation_count = count_mlocations(fore_ground_indices[region], mlocation_indices_array)
+    #     pole_position_dataset = voxel_set[fore_ground_indices[pole_position]]
+    #     # 如果包含两个物体进行min cut 如果只包含一个则直接加入杆物体列表
+    #     if mlocation_count > 1:
+    #         pole = min_cut(center_x, center_y, pole_position_dataset, region_dataset, intensity_array[region],
+    #                        points_count_array[region], 26, 2, 25)
+    #         poles_array.append(region[pole])
+    #     else:
+    #         poles_array.append(fore_ground_indices[region])
+    regions = np.array(regions)
+    fore_ground_indices = np.array(fore_ground_indices)
+    result_regions = []
+    for region in regions:
+        result_regions.append(fore_ground_indices[region])
+    return np.array(result_regions)
 
 
-def pole_detection(lasfile, csvfile, voxel_size, position_height, fixed_radius, normal_threshold, inner_radius,
+def search_two_dimensional_array(array, element):
+    a = np.where(array == element)
+    if len(a[0]) == 0:
+        return 0
+    elif len(a[0]) > 1:
+        return a[0][0] + 1
+    else:
+        return a[0] + 1
+
+def pole_detection(lasfile, csvfile, voxel_size, position_height, normal_radius, normal_threshold, inner_radius,
                    outer_radius, cyliner_height, ratio_threshold, max_height):
+    import time
+    print "\n     voxelizing..."
     voxelization(lasfile, csvfile, voxel_size)
+
     with open(csvfile, 'rb') as in_csv_file:
         reader = csv.reader(in_csv_file)
         line = [[row[0], row[1], row[2]] for row in reader]
     voxel_code_array = np.array(line)[:, 0]
-    points_count_array = np.array(line)[:, 1]
-    intensity_array = np.array(line)[:, 2]
-    ground_array =np.array([0] * len(voxel_code_array))
+    points_count_array = np.vectorize(int)(np.array(line)[:, 1])
+    intensity_array = np.vectorize(int)(np.array(line)[:, 2])
+
+    start = time.clock()
     print "\n    Step1...original location detecting"
-    olocation_array = original_localization(voxel_code_array, voxel_size, position_height)
+    olocation_indices_array = original_localization(voxel_code_array, voxel_size, position_height)
+    print "\n    time: ", time.clock()-start
 
+    start = time.clock()
     print "\n    Step2...merging location"
-    mlocation_array = merging_neighbor_location(voxel_code_array, olocation_array)
+    mlocation_indices_array = merging_neighbor_location(voxel_code_array, olocation_indices_array)
+    print "\n    time: ", time.clock()-start
 
+    start = time.clock()
     print "\n    Step3...removing background"
-    normal_array, ground_indices = remove_background(voxel_code_array, mlocation_array, fixed_radius, normal_threshold)
+    normal_array, ground_indices = remove_background(voxel_code_array, mlocation_indices_array, normal_radius,
+                                                    normal_threshold)
+    print "\n    time: ", time.clock()-start
 
+    start = time.clock()
     print "\n    Step4...detecting pole position"
-    pole_number_array = pole_position_detection(points_count_array, voxel_code_array, olocation_array, mlocation_array,
-                                                inner_radius, outer_radius, cyliner_height,
-                                                ratio_threshold, voxel_size, max_height)
+    # pole_position_indices_array = pole_position_detection_by_fixed_inner_radius(points_count_array, voxel_code_array, mlocation_indices_array,
+    #                                                       ground_indices, inner_radius, outer_radius, cyliner_height,
+    #                                                       ratio_threshold, voxel_size, max_height)
+    pole_position_indices_array = pole_position_detection_by_mlocation_radius(points_count_array, voxel_code_array,
+                                                                              mlocation_indices_array, ground_indices,
+                                                                              cyliner_height, ratio_threshold,
+                                                                              voxel_size, max_height)
+    print "\n    time: ", time.clock()-start
 
-    # print '\n    Step5...pole segmentation'
-    # poles_array = pole_segmentation(points_count_array, voxel_code_array, olocation_array, mlocation_array,
-    #                                 ground_indices)
+    start = time.clock()
+    print '\n    Step5...pole segmentation'
+    poles_array = pole_segmentation(points_count_array, intensity_array, voxel_code_array, mlocation_indices_array,
+                                    ground_indices, pole_position_indices_array)
+    print "\n    time: ", time.clock()-start
+    if len(poles_array) == 0:
+        return
 
-    length = len(voxel_code_array)
-    with open(csvfile, 'wb') as out_csv_file:
-        csvwriter = csv.writer(out_csv_file)
-        row = 0
-        while row < length:
-            csvwriter.writerow([olocation_array[row], points_count_array[row], intensity_array[row],
-                                olocation_array[row], mlocation_array[row], normal_array[row], ground_array[row],
-                                pole_number_array[row]])
-            row += 1
+    print "\n    Step6....labeling points in lasfile"
+    mlocation_array = np.array([0] * len(voxel_code_array))
+    ground_array = np.array([0] * len(voxel_code_array))
+    pole_position_array = np.array([0] * len(voxel_code_array))
+    pole_array = np.array([0] * len(voxel_code_array))
+    count = 1
+
+    for mlocation in mlocation_indices_array:
+        mlocation_array[mlocation] = count
+        count += 1
+
+    count = 1
+    for ground in ground_indices:
+        ground_array[ground] = count
+        count += 1
+    count = 1
+    for pole_position in pole_position_indices_array:
+        pole_position_array[pole_position] = count
+        count += 1
+    count = 1
+    for pole in poles_array:
+        pole_array[pole] = count
+        count += 1
+
+    lasfile = laspy.file.File(lasfile, mode="rw")
+    point_count = 0
+    lasfile.user_data[:] = 0
+    lasfile.gps_time[:] = 0
+    lasfile.raw_classification[:] = 0
+    lasfile.pt_src_id[:] = 0
+    for voxel_index in lasfile.voxel_index:
+        lasfile.mlocation[point_count] = mlocation_array[voxel_index]
+        # classification is corresponding to fore or back ground
+        lasfile.gps_time[point_count] = normal_array[voxel_index]
+        lasfile.user_data[point_count] = pole_position_array[voxel_index]
+        lasfile.raw_classification[point_count] = ground_array[voxel_index]
+        lasfile.pt_src_id[point_count] = pole_array[voxel_index]
+        point_count += 1
+    lasfile.close()
+    print "Done!"
 
 
 def label_points_location(las_path, voxel_path):
@@ -860,15 +1083,6 @@ def connected_component_labeling_file(in_file, out_file):
 
 print '''Welcome to the PLOs detection System!!
 
-Please Follow the classification step:
-1. add a dimension to the las file
-2. voxelize the point cloud
-3. detect original localization
-4. merge the original locations
-5. detect pole part
-6. remove background
-7. labeling points in las file
-8. default value is to do all the jobs
 '''
 loop = True
 while loop:
@@ -882,27 +1096,24 @@ while loop:
 
 size_of_voxel = 0.2
 
-# minimun height of voxel to constitute a postion
-minimun_position_height = 1.0
+# 定义一个位置点的最小高度
+minimun_position_height = 0.8
 
-# poles are suposed to be lower than the max_height_of_pole
+# 超过这个高度的不被认为是杆
 max_height_of_pole = 15
 
-# the height of the cylinder to calculate the ratio of the pole parts
-cylinder_height = 1.4
-cylinder_ratio = 0.95
-in_radius = 0.6
-out_radius = 1.4
+# 用来进行isolation分析的圆柱的高
+cylinder_height = 0.8
+cylinder_ratio = 0.75
+in_radius = 0.4
+out_radius = 0.6
 
-startheight = 0.1
-# the cylinder height radius to find foreground voxels
-cylinder_radius_for_foreground = 5
-cylinder_height_for_foreground = 12
-fixed_radius=1
-normal_threshold=0.6
+# 计算法向量的搜索半径
+fixed_radius = 1
+# 法向量大于这个值的才被认为是地面点
+normal_threshold = 0.5
 outlas = infilepath[:-4] + '_' + str(size_of_voxel) + '_' + str(int(minimun_position_height / size_of_voxel)) + '.las'
 outcsv = outlas[:-4] + '.csv'
-
 
 start = time.clock()
 print "Adding dimensions..."
@@ -912,13 +1123,9 @@ print "Adding dimensions costs seconds ", time.clock() - start
 
 start = time.clock()
 print '\nPLOs detection...'
-pole_detection(outlas, outcsv, size_of_voxel, minimun_position_height, fixed_radius, normal_threshold,in_radius,
+pole_detection(outlas, outcsv, size_of_voxel, minimun_position_height, fixed_radius, normal_threshold, in_radius,
                out_radius, cylinder_height, cylinder_ratio, max_height_of_pole)
 print "PLOs detection costs seconds ", time.clock() - start
 
-print '\nLabeling points...'
-start = time.clock()
-label_points_location(outlas, outcsv)
-print "Labeling points costs seconds", time.clock() - start
 os.system('pause')
 
