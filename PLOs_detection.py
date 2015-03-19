@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 __author__ = 'Administrator'
-# lidar_classification.py
+# PLOs_detection.py
 import laspy
 import time
 import os
@@ -147,122 +147,6 @@ def voxelization(infile_path, outfile_path, voxel_size):
         while count < code_array_length:
             writer.writerow([code_array[count], points_in_one_voxel_array[count], intensity_in_one_voxel_array[count]])
             count += 1
-
-
-def original_localization(voxel_code_array, voxel_size, min_position_height):
-    """
-    the original step of finding a potential location of an object in the voxel
-
-    recognize potential object location in all the voxels by judging if one horizontal location has enough
-    vertically connected voxels
-    Args:
-        infile_path: the filepath of the original voxel file, the *.voxel file
-        outfile_path: the filepath of the processed voxel file, add a column to the original file which label
-                      the potential location ID of the voxel, if the voxel is not a location then the value
-                      will be 0
-        min_position_height: the minimun height of continuous connected voxel which specify an object
-    Returns:
-        None
-    """
-
-    # parse the string array to integer array for later calculation
-    voxel_code_int_array = np.vectorize(long)(voxel_code_array)
-
-    # counter of the voxel
-    voxel_count = 0
-    location_count = 1
-    length = len(voxel_code_array)
-    indices = range(length)
-
-    # the array that stores the location label of the voxel, if the voxel does not belong to a voxel the value is zero
-    location_id_array = np.array([0] * length)
-    olocation_indices_array = []
-    vertical_count_threshold = int(min_position_height / voxel_size)
-    temp = [1] * vertical_count_threshold
-    # traverse all the voxel to assign location label
-    while voxel_count < length - vertical_count_threshold:
-        v1 = voxel_code_int_array[voxel_count:voxel_count + vertical_count_threshold]
-        v2 = voxel_code_int_array[voxel_count + 1:voxel_count + 1 + vertical_count_threshold]
-        v = list(map(lambda x: x[0] - x[1], zip(v2, v1)))
-        # judge if the vertical_count_threshold number of voxel value are continuous
-        if v == temp:
-            temp_locations = []
-            location_id_array[voxel_count:voxel_count + 1 + vertical_count_threshold] = location_count
-            temp_locations += indices[voxel_count:voxel_count + 1 + vertical_count_threshold]
-            voxel_count += vertical_count_threshold + 1
-            while voxel_code_int_array[voxel_count] - voxel_code_int_array[voxel_count - 1] == 1 \
-                    and voxel_count < length:
-                location_id_array[voxel_count] = location_count
-                temp_locations.append(voxel_count)
-                voxel_count += 1
-            location_count += 1
-            olocation_indices_array.append(temp_locations)
-            # 连续的某个位置出现位置点后，其上面的不连续的点全部被当作非位置点
-            change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
-                                        int(voxel_code_int_array[voxel_count - 1] / 10000)
-            while change_flag == 0 and voxel_count < length - 1:
-                voxel_count += 1
-                change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
-                              int(voxel_code_int_array[voxel_count - 1] / 10000)
-        else:
-            # 若最低位不是位置点，则该x，y位置所有点都不是位置点，直接过滤掉
-            voxel_count += 1
-            change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
-                                        int(voxel_code_int_array[voxel_count - 1] / 10000)
-            while change_flag == 0 and voxel_count < length - 1:
-                voxel_count += 1
-                change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
-                              int(voxel_code_int_array[voxel_count - 1] / 10000)
-            # # when the voxels after more than threshold number of voxels are not continuous
-            # # then these voxels are considered as non-location voxel
-            # change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
-            #                             int(voxel_code_int_array[voxel_count - 1] / 10000)
-            # while change_flag == 0 and voxel_count < length - 1:
-            #     voxel_count += 1
-            #     change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
-            #                   int(voxel_code_int_array[voxel_count - 1] / 10000)
-        # 1. when the voxels in one location has less than threshold number of continuous voxel
-        # 2. when the voxels after more than threshold number of voxels are not continuous
-        # then these voxels are considered as no-location voxel
-        # 此处可以测试是否第二种情况可以间隔几个voxel也算location，这样可以解决稀疏情况下的问题
-        # else:
-        #     voxel_count += 1
-        #     change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
-        #                                 int(voxel_code_int_array[voxel_count - 1] / 10000)
-        #     while change_flag == 0 and voxel_count < length - 1:
-        #         voxel_count += 1
-        #         change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
-        #                       int(voxel_code_int_array[voxel_count - 1] / 10000)
-    return np.array(olocation_indices_array)
-
-
-def merging_neighbor_location(original_code_array, olocation_indices_array):
-    """
-    merge neighbor location to form the location of an object, each location is then corresponding to each object
-
-    merge the neighboring location of the original location, the merged location is then labeled to each point in the
-    las file
-    Args:
-        csvfile: the csv file which stores the code and the original location label
-    Returns:
-        None
-    """
-
-    # get the first 8 char of the code list
-    x_list = []
-    y_list = []
-    for olocation_indices in olocation_indices_array:
-        x_list.append(int(original_code_array[olocation_indices[0]][0:4]))
-        y_list.append(int(original_code_array[olocation_indices[0]][4:8]))
-    dataset = np.vstack([x_list, y_list]).transpose()
-    merged_locations = two_dimensional_region_growing(dataset, 1.5)
-    mlocation_indices_array = []
-    for mlocations in merged_locations:
-        temp_mlocations = []
-        for mlocation in mlocations:
-            temp_mlocations += list(olocation_indices_array[mlocation])
-        mlocation_indices_array.append(temp_mlocations)
-    return mlocation_indices_array
 
 
 def connected_component_labeling(voxelset, radius):
@@ -441,6 +325,258 @@ def remove_background(original_code_array, mlocation_array, radius, normal_thres
     return normal_list, ground
 
 
+def original_localization_by_rigid_continuity(voxel_code_array, voxel_size, min_position_height):
+    """
+    通过严格的连续条件来查找位置点
+
+    所谓严格条件指的是一个xy位置点必须连续存在若干个z方向上的连续点，而且只考虑该x，y，而不考虑其周围点的影响，这样检测不出一些倾斜杆
+
+    recognize potential object location in all the voxels by judging if one horizontal location has enough
+    vertically connected voxels
+    Args:
+        infile_path: the filepath of the original voxel file, the *.voxel file
+        outfile_path: the filepath of the processed voxel file, add a column to the original file which label
+                      the potential location ID of the voxel, if the voxel is not a location then the value
+                      will be 0
+        min_position_height: the minimun height of continuous connected voxel which specify an object
+    Returns:
+        None
+    """
+
+    # parse the string array to integer array for later calculation
+    voxel_code_int_array = np.vectorize(long)(voxel_code_array)
+
+    # counter of the voxel
+    voxel_count = 0
+    location_count = 1
+    length = len(voxel_code_array)
+    indices = range(length)
+
+    # the array that stores the location label of the voxel, if the voxel does not belong to a voxel the value is zero
+    location_id_array = np.array([0] * length)
+    olocation_indices_array = []
+    vertical_count_threshold = int(min_position_height / voxel_size)
+    temp = [1] * vertical_count_threshold
+    # traverse all the voxel to assign location label
+    while voxel_count < length - vertical_count_threshold:
+        v1 = voxel_code_int_array[voxel_count:voxel_count + vertical_count_threshold]
+        v2 = voxel_code_int_array[voxel_count + 1:voxel_count + 1 + vertical_count_threshold]
+        v = list(map(lambda x: x[0] - x[1], zip(v2, v1)))
+        # judge if the vertical_count_threshold number of voxel value are continuous
+        if v == temp:
+            temp_locations = []
+            location_id_array[voxel_count:voxel_count + 1 + vertical_count_threshold] = location_count
+            temp_locations += indices[voxel_count:voxel_count + 1 + vertical_count_threshold]
+            voxel_count += vertical_count_threshold + 1
+            while voxel_code_int_array[voxel_count] - voxel_code_int_array[voxel_count - 1] == 1 \
+                    and voxel_count < length:
+                location_id_array[voxel_count] = location_count
+                temp_locations.append(voxel_count)
+                voxel_count += 1
+            location_count += 1
+            olocation_indices_array.append(temp_locations)
+            # 连续的某个位置出现位置点后，其上面的不连续的点全部被当作非位置点
+            change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
+                                        int(voxel_code_int_array[voxel_count - 1] / 10000)
+            while change_flag == 0 and voxel_count < length - 1:
+                voxel_count += 1
+                change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
+                              int(voxel_code_int_array[voxel_count - 1] / 10000)
+        else:
+            # 若最低位不是位置点，则该x，y位置所有点都不是位置点，直接过滤掉
+            voxel_count += 1
+            change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
+                                        int(voxel_code_int_array[voxel_count - 1] / 10000)
+            while change_flag == 0 and voxel_count < length - 1:
+                voxel_count += 1
+                change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
+                              int(voxel_code_int_array[voxel_count - 1] / 10000)
+            # # when the voxels after more than threshold number of voxels are not continuous
+            # # then these voxels are considered as non-location voxel
+            # change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
+            #                             int(voxel_code_int_array[voxel_count - 1] / 10000)
+            # while change_flag == 0 and voxel_count < length - 1:
+            #     voxel_count += 1
+            #     change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
+            #                   int(voxel_code_int_array[voxel_count - 1] / 10000)
+        # 1. when the voxels in one location has less than threshold number of continuous voxel
+        # 2. when the voxels after more than threshold number of voxels are not continuous
+        # then these voxels are considered as no-location voxel
+        # 此处可以测试是否第二种情况可以间隔几个voxel也算location，这样可以解决稀疏情况下的问题
+        # else:
+        #     voxel_count += 1
+        #     change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
+        #                                 int(voxel_code_int_array[voxel_count - 1] / 10000)
+        #     while change_flag == 0 and voxel_count < length - 1:
+        #         voxel_count += 1
+        #         change_flag = int(voxel_code_int_array[voxel_count] / 10000) - \
+        #                       int(voxel_code_int_array[voxel_count - 1] / 10000)
+    return np.array(olocation_indices_array)
+
+
+def original_localization_by_no_rigid_continuity(voxel_code_array, voxel_size, min_position_height):
+    """
+    通过不严格的连续条件来查找位置点
+
+    所谓不严格条件指的是一个xy位置点不一定要严格连续存在若干个z方向上的连续点，比如中间隔了若干个格子也可以当作是连续的，这里需要设置
+    一个阈值。而且考虑向上连续性是不只是考虑x，y点，而是考虑x，y周围的一个圆柱范围内的点。这样可以检测有一定倾斜度的杆状物。
+
+    recognize potential object location in all the voxels by judging if one horizontal location has enough
+    vertically connected voxels
+    Args:
+        infile_path: the filepath of the original voxel file, the *.voxel file
+        outfile_path: the filepath of the processed voxel file, add a column to the original file which label
+                      the potential location ID of the voxel, if the voxel is not a location then the value
+                      will be 0
+        min_position_height: the minimun height of continuous connected voxel which specify an object
+    Returns:
+        None
+    """
+
+    # parse the string array to integer array for later calculation
+    voxel_code_int_array = np.vectorize(long)(voxel_code_array)
+
+    # counter of the voxel
+    voxel_count = 0
+    location_count = 1
+    length = len(voxel_code_array)
+    indices = range(length)
+
+    # the array that stores the location label of the voxel, if the voxel does not belong to a voxel the value is zero
+    location_id_array = np.array([0] * length)
+    olocation_indices_array = []
+    vertical_count_threshold = int(min_position_height / voxel_size)
+    temp = [1] * vertical_count_threshold
+    # traverse all the voxel to assign location label
+    while voxel_count < length - vertical_count_threshold:
+        v1 = voxel_code_int_array[voxel_count:voxel_count + vertical_count_threshold]
+        v2 = voxel_code_int_array[voxel_count + 1:voxel_count + 1 + vertical_count_threshold]
+        v = list(map(lambda x: x[0] - x[1], zip(v2, v1)))
+        # judge if the vertical_count_threshold number of voxel value are continuous
+        if v == temp:
+            temp_locations = []
+            location_id_array[voxel_count:voxel_count + 1 + vertical_count_threshold] = location_count
+            temp_locations += indices[voxel_count:voxel_count + 1 + vertical_count_threshold]
+            voxel_count += vertical_count_threshold + 1
+            while voxel_code_int_array[voxel_count] - voxel_code_int_array[voxel_count - 1] == 1 and voxel_count < length:
+                location_id_array[voxel_count] = location_count
+                temp_locations.append(voxel_count)
+                voxel_count += 1
+            location_count += 1
+            olocation_indices_array.append(temp_locations)
+            # 连续的某个位置出现位置点后，其上面的不连续的点全部被当作非位置点
+            change_flag = int(voxel_code_int_array[voxel_count] / 10000) - int(voxel_code_int_array[voxel_count - 1] / 10000)
+            while change_flag == 0 and voxel_count < length - 1:
+                voxel_count += 1
+                change_flag = int(voxel_code_int_array[voxel_count] / 10000) - int(voxel_code_int_array[voxel_count - 1] / 10000)
+        else:
+            # 若最低位不是位置点，则该x，y位置所有点都不是位置点，直接过滤掉
+            voxel_count += 1
+            change_flag = int(voxel_code_int_array[voxel_count] / 10000) - int(voxel_code_int_array[voxel_count - 1] / 10000)
+            while change_flag == 0 and voxel_count < length - 1:
+                voxel_count += 1
+                change_flag = int(voxel_code_int_array[voxel_count] / 10000) - int(voxel_code_int_array[voxel_count - 1] / 10000)
+    return np.array(olocation_indices_array)
+
+
+def vertical_continiuity_analysis(voxel_code_array, voxel_size, min_position_height, point_count_array):
+    """
+
+    向上连续性分析，分析出具有连续性的位置点
+
+    通过从最低位置点开始，向上面方向的邻居做增长，选取包含最多点的体素作为增长的方向，依次类推，直到没有了向上的体素为止。
+    """
+    # 存储所有位置的最低点作为增长的种子点
+
+    x_array = np.vectorize(int)(map(lambda x: x[:4], voxel_code_array))
+    y_array = np.vectorize(int)(map(lambda x: x[4:8], voxel_code_array))
+    z_array = np.vectorize(int)(map(lambda x: x[8:12], voxel_code_array))
+    seeds_list = []
+    voxel_length = len(x_array)
+    count = 1
+    previous_x = x_array[0]
+    previous_y = y_array[0]
+    minz = z_array[0]
+    seed_index = 0
+    # 计算出所有种子点
+    while count < voxel_length:
+        if x_array[count] == previous_x and y_array[count] == previous_y:
+            if z_array[count] < minz:
+                minz = z_array[count]
+                seed_index = count
+        else:
+            seeds_list.append(seed_index)
+            seed_index = count
+            minz = z_array[count]
+        previous_x = x_array[count]
+        previous_y = y_array[count]
+        count += 1
+    dataset = np.vstack([x_array, y_array, z_array]).transpose()
+    tree = scipy.spatial.cKDTree(dataset)
+    # 存储3维位置点信息
+    location_list_list = []
+    # 存储水平位置点集合
+    horizontal_location_list = []
+    for seed in seeds_list:
+        location_list = []
+        vertical_count = 0
+        current_seed = seed
+        up_neighbor_lenght = 1
+        location_list.append(current_seed)
+        # 选择26邻居体素
+        while up_neighbor_lenght > 0:
+            neighbors = tree.query_ball_point([x_array[current_seed], y_array[current_seed], z_array[current_seed]], 1.8)
+            neighbors = np.array(neighbors)
+            up_neighbor_lenght = 0
+            if len(neighbors) > 0:
+                up_index = np.where(z_array[neighbors] - z_array[current_seed] == 1)[0]
+                up_neighbor_lenght = len(up_index)
+                if up_neighbor_lenght > 0:
+                    vertical_count += 1
+                    if up_neighbor_lenght == 1:
+                        current_seed = neighbors[up_index][0]
+                    else:
+                        temp_index = np.where(point_count_array[neighbors[up_index]] ==
+                                              max(point_count_array[neighbors[up_index]]))[0][0]
+                        # temp_index = point_count_array[neighbors[up_index]].index(max(point_count_array[neighbors[up_index]]))
+                        current_seed = neighbors[up_index[temp_index]]
+                    location_list.append(current_seed)
+        # 若向上增长能达到一定高度，则被认为是一个潜在的位置点
+        if len(location_list) * voxel_size >= minimun_position_height:
+            location_list_list.append(location_list)
+            horizontal_location_list.append(seed)
+    return horizontal_location_list, location_list_list
+
+
+def merging_neighbor_location(original_code_array, olocation_indices_array):
+    """
+    merge neighbor location to form the location of an object, each location is then corresponding to each object
+
+    merge the neighboring location of the original location, the merged location is then labeled to each point in the
+    las file
+    Args:
+        csvfile: the csv file which stores the code and the original location label
+    Returns:
+        None
+    """
+
+    # get the first 8 char of the code list
+    x_list = []
+    y_list = []
+    for olocation_indices in olocation_indices_array:
+        x_list.append(int(original_code_array[olocation_indices[0]][0:4]))
+        y_list.append(int(original_code_array[olocation_indices[0]][4:8]))
+    dataset = np.vstack([x_list, y_list]).transpose()
+    merged_locations = two_dimensional_region_growing(dataset, 1.5)
+    mlocation_indices_array = []
+    for mlocations in merged_locations:
+        temp_mlocations = []
+        for mlocation in mlocations:
+            temp_mlocations += list(olocation_indices_array[mlocation])
+        mlocation_indices_array.append(temp_mlocations)
+    return mlocation_indices_array
+
+
 def pole_position_detection_by_fixed_inner_radius(points_count_in_one_voxel_array, original_code_array,
                                                   mlocation_indices_array, ground_indices, inner_radius, outer_radius,
                                                   cyliner_height, ratio_threshold, voxel_size,max_height):
@@ -584,23 +720,26 @@ def pole_position_detection_by_mlocation_radius(points_count_in_one_voxel_array,
         None
     """
     fore_ground_indices = range(len(points_count_in_one_voxel_array))
-    ground_list = []
+    back_ground_indices_sorted = []
     for ground_region in ground_indices:
-        ground_list += list(ground_region)
-    ground_list.sort(cmp=None, key=None, reverse=True)
-    for indice in ground_list:
+        back_ground_indices_sorted += list(ground_region)
+    back_ground_indices_sorted.sort(cmp=None, key=None, reverse=True)
+    for indice in back_ground_indices_sorted:
         del fore_ground_indices[indice]
 
     fore_ground_indices = np.array(fore_ground_indices)
-
     original_x_int_array = np.vectorize(int)(map(lambda x: x[:4], original_code_array))
     original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], original_code_array))
     original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], original_code_array))
 
     # 建立KD树
-    dataset = np.vstack([original_x_int_array[fore_ground_indices], original_y_int_array[fore_ground_indices],
+    fore_dataset = np.vstack([original_x_int_array[fore_ground_indices], original_y_int_array[fore_ground_indices],
                          original_z_int_array[fore_ground_indices]]).transpose()
-    tree = scipy.spatial.cKDTree(dataset)
+    fore_tree = scipy.spatial.cKDTree(fore_dataset)
+    back_dataset = np.vstack([original_x_int_array[back_ground_indices_sorted],
+                              original_y_int_array[back_ground_indices_sorted],
+                              original_z_int_array[back_ground_indices_sorted]]).transpose()
+    back_tree = scipy.spatial.cKDTree(back_dataset)
     # 存储杆位置的索引号，每个元素对应一个杆的位置
     pole_indices_array = []
     # 圆柱高度对应的voxe个数
@@ -611,8 +750,15 @@ def pole_position_detection_by_mlocation_radius(points_count_in_one_voxel_array,
         x_int_array = original_x_int_array[one_mlocation_indices]
         y_int_array = original_y_int_array[one_mlocation_indices]
         z_int_array = original_z_int_array[one_mlocation_indices]
-
-
+        # 存储当前位置的最低点，用来计算杆子位置与地面位置的距离，过滤掉悬空杆
+        mlocation_bottom_indice = np.argmin(z_int_array)
+        distance, neighbor = back_tree.query([x_int_array[mlocation_bottom_indice],
+                                              y_int_array[mlocation_bottom_indice],
+                                              z_int_array[mlocation_bottom_indice]])
+        # 如果最近的地面点与位置底部距离大于2，则表示是悬空杆
+        z_neighbor = original_z_int_array[back_ground_indices_sorted[neighbor]]
+        if z_int_array[mlocation_bottom_indice] - z_neighbor > 1:
+            continue
         # selecte codes under a height threshold in one mlocation
         minz = min(z_int_array)
         minx = min(x_int_array)
@@ -631,6 +777,11 @@ def pole_position_detection_by_mlocation_radius(points_count_in_one_voxel_array,
         voxel_inner_radius = location_radius
         voxel_outer_radius = location_radius + 1
 
+        # 如果垂直方向长度与半径比小于等于2，则该位置不能判断为杆位置
+        if voxel_inner_radius > 0:
+            if (z_int_array.max() - z_int_array.min()) / voxel_inner_radius < 4:
+                continue
+
         # 外切球半径: 圆柱中心点与圆柱底边圆上点的距离
         query_radius = int((voxel_outer_radius**2 + (voxel_cylinder_height/2)**2)**0.5 + 0.5)
         # 找到mlocation的中心点，实际为外包框的中心点
@@ -638,14 +789,11 @@ def pole_position_detection_by_mlocation_radius(points_count_in_one_voxel_array,
         center_y = 0.5 * (maxy + miny)
 
         # 为了提高速度，先计算圆柱所在大球内所有的voxel
-        temp_indices = tree.query_ball_point([center_x, center_y, minz + 0.5 * cylinder_height / voxel_size],
+        temp_indices = fore_tree.query_ball_point([center_x, center_y, minz + 0.5 * cylinder_height / voxel_size],
                                              query_radius)
 
         # 计算球内位于小圆柱内的voxel
         temp_indices = np.array(temp_indices)
-        in_voxels_flag1 = np.logical_and(original_z_int_array[fore_ground_indices[temp_indices]] >= minz,
-                                         original_z_int_array[fore_ground_indices[temp_indices]] <= minz +
-                                         voxel_cylinder_height)
         temp_distances = ((original_x_int_array[fore_ground_indices[temp_indices]] - center_x)**2 +
                                (original_y_int_array[fore_ground_indices[temp_indices]] - center_y)**2)**0.5
         in_voxels = np.where((temp_distances <= voxel_inner_radius) &
@@ -780,7 +928,7 @@ def region_growing_by_seeds(voxelset, seeds_array, distance_threshold):
                         region.append(neighbor)
                         new_seeds.append(neighbor)
             # 默认太大的物体不是杆状物
-            if len(region) > 1000:
+            if len(region) > 500:
                 break
         reached_flag[region] = True
         regions.append(np.array(region))
@@ -866,11 +1014,22 @@ def search_two_dimensional_array(array, element):
     else:
         return a[0] + 1
 
+
 def pole_detection(lasfile, csvfile, voxel_size, position_height, normal_radius, normal_threshold, inner_radius,
                    outer_radius, cyliner_height, ratio_threshold, max_height):
     import time
-    print "\n     voxelizing..."
-    voxelization(lasfile, csvfile, voxel_size)
+    start = time.clock()
+    # 如果已经添加过字段了就不用再添加
+    if not os.path.exists(lasfile):
+        print "Adding dimensions..."
+        add_dimension(infilepath, lasfile, ["voxel_index", "olocation", "mlocation"], [5, 5, 3],
+                      ["voxel num the point in", "original location label", "merged location label"])
+    print "Adding dimensions costs seconds ", time.clock() - start
+
+    # 如果体素化了下一次就不用体素化了
+    if not os.path.exists(lasfile) or not os.path.exists(csvfile):
+        print "\n     voxelizing..."
+        voxelization(lasfile, csvfile, voxel_size)
 
     with open(csvfile, 'rb') as in_csv_file:
         reader = csv.reader(in_csv_file)
@@ -881,7 +1040,7 @@ def pole_detection(lasfile, csvfile, voxel_size, position_height, normal_radius,
 
     start = time.clock()
     print "\n    Step1...original location detecting"
-    olocation_indices_array = original_localization(voxel_code_array, voxel_size, position_height)
+    olocation_indices_array = original_localization_by_rigid_continuity(voxel_code_array, voxel_size, position_height)
     print "\n    time: ", time.clock()-start
 
     start = time.clock()
@@ -1080,52 +1239,92 @@ def connected_component_labeling_file(in_file, out_file):
                              all_label_array[count]])
             count += 1
 
+if __name__ == '__main__':
+    print '''Welcome to the PLOs detection System!!
 
-print '''Welcome to the PLOs detection System!!
+    '''
+    loop = True
+    while loop:
+        infilepath = raw_input('\n Now please input the original las file name: \n')
+        if infilepath[-4:] == '.las':
+            loop = False
+        else:
+            print("Please input a *.las file!!!")
 
-'''
-loop = True
-while loop:
-    infilepath = raw_input('\n Now please input the original las file name: \n')
-    if infilepath[-4:] == '.las':
-        loop = False
-    elif infilepath == 'q':
-        loop = False
-    else:
-        print("Please input a *.las file!!!")
+    size_of_voxel = 0.1
 
-size_of_voxel = 0.2
+    # 定义一个位置点的最小高度
+    minimun_position_height = 0.8
 
-# 定义一个位置点的最小高度
-minimun_position_height = 0.8
+    # 超过这个高度的不被认为是杆
+    max_height_of_pole = 15
 
-# 超过这个高度的不被认为是杆
-max_height_of_pole = 15
+    # 用来进行isolation分析的圆柱的高
+    cylinder_height = 0.8
+    cylinder_ratio = 0.91
+    in_radius = 0.4
+    out_radius = 0.6
 
-# 用来进行isolation分析的圆柱的高
-cylinder_height = 0.8
-cylinder_ratio = 0.75
-in_radius = 0.4
-out_radius = 0.6
+    # 计算法向量的搜索半径
+    fixed_radius = 1
+    # 法向量大于这个值的才被认为是地面点
+    normal_threshold = 0.5
+    outlas = infilepath[:-4] + '_' + str(size_of_voxel) + '_' + str(int(minimun_position_height / size_of_voxel)) + '.las'
+    outcsv = outlas[:-4] + '.csv'
 
-# 计算法向量的搜索半径
-fixed_radius = 1
-# 法向量大于这个值的才被认为是地面点
-normal_threshold = 0.5
-outlas = infilepath[:-4] + '_' + str(size_of_voxel) + '_' + str(int(minimun_position_height / size_of_voxel)) + '.las'
-outcsv = outlas[:-4] + '.csv'
+    start = time.clock()
+    # 如果已经添加过字段了就不用再添加
+    if not os.path.exists(outlas):
+        print "Adding dimensions..."
+        add_dimension(infilepath, outlas, ["voxel_index", "olocation", "mlocation"], [5, 5, 3],
+                      ["voxel num the point in", "original location label", "merged location label"])
+    print "Adding dimensions costs seconds ", time.clock() - start
 
-start = time.clock()
-print "Adding dimensions..."
-add_dimension(infilepath, outlas, ["voxel_index", "olocation", "mlocation"], [5, 5, 3],
-              ["voxel num the point in", "original location label", "merged location label"])
-print "Adding dimensions costs seconds ", time.clock() - start
+    ############### 1.体素化 ################
+    # 如果体素化了下一次就不用体素化了
+    if not os.path.exists(outlas) or not os.path.exists(outcsv):
+        print "\n     voxelizing..."
+        voxelization(outlas, outcsv, size_of_voxel)
 
-start = time.clock()
-print '\nPLOs detection...'
-pole_detection(outlas, outcsv, size_of_voxel, minimun_position_height, fixed_radius, normal_threshold, in_radius,
-               out_radius, cylinder_height, cylinder_ratio, max_height_of_pole)
-print "PLOs detection costs seconds ", time.clock() - start
+    with open(outcsv, 'rb') as in_csv_file:
+        reader = csv.reader(in_csv_file)
+        line = [[row[0], row[1], row[2]] for row in reader]
+    voxel_code_array = np.array(line)[:, 0]
+    points_count_array = np.vectorize(int)(np.array(line)[:, 1])
+    intensity_array = np.vectorize(int)(np.array(line)[:, 2])
 
-os.system('pause')
+    horizontal_location_list, location_list_list = vertical_continiuity_analysis(voxel_code_array, size_of_voxel, minimun_position_height, points_count_array)
+
+    # 标记点
+    location_array = np.array([0] * len(voxel_code_array))
+    horizontal_location_array = np.array([0]*len(voxel_code_array))
+    count = 1
+    for location_list in location_list_list:
+        location_array[location_list] = count
+        count += 1
+
+    count = 1
+    for location in horizontal_location_list:
+        horizontal_location_array[location] = count
+        count += 1
+
+    lasfile = laspy.file.File(outlas, mode="rw")
+    point_count = 0
+    lasfile.user_data[:] = 0
+    lasfile.gps_time[:] = 0
+    lasfile.raw_classification[:] = 0
+    lasfile.pt_src_id[:] = 0
+    for voxel_index in lasfile.voxel_index:
+        lasfile.olocation[point_count] = location_array[voxel_index]
+        lasfile.gps_time[point_count] = horizontal_location_array[voxel_index]
+        point_count += 1
+    lasfile.close()
+
+    # start = time.clock()
+    # print '\nPLOs detection...'
+    # pole_detection(outlas, outcsv, size_of_voxel, minimun_position_height, fixed_radius, normal_threshold, in_radius,
+    #                out_radius, cylinder_height, cylinder_ratio, max_height_of_pole)
+    # print "PLOs detection costs seconds ", time.clock() - start
+
+    os.system('pause')
 
