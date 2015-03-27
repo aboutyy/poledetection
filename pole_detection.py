@@ -3,7 +3,7 @@
 # Created by You Li on 2015-03-09 0009
 
 import laspy
-import time
+import timeit
 import os
 import csv
 import numpy as np
@@ -19,10 +19,10 @@ VOXEL_SIZE = 0.15
 MIN_HEIGHT = 1
 
 # 杆离地面最大距离
-DISTANCE_TO_GROUND = 0.8
+DISTANCE_TO_GROUND = 1.05
 
 # 杆在地面的最大面积
-MAX_AREA = 0.6
+MAX_AREA = 0.36
 
 # 邻居最远体素距离
 MAX_NEIGHBOR_DISTANCE = 0.34
@@ -37,7 +37,11 @@ MIN_CYLINDER_HEIGHT = 0.6
 DISTANCE_OF_IN2OUT = 0.2
 
 # 双圆柱用来定义杆的内外点比例
-RATIO_OF_POINTS_COUNT = 0.9
+RATIO_OF_POINTS_COUNT = 0.95
+
+# 是否进行地面距离判定
+USE_GROUND = True
+
 
 def add_dimension(infile_path, outfile_path, names, types, descriptions):
     """
@@ -129,7 +133,10 @@ def voxelization(infile_path, outfile_path, voxel_size):
 
     # the array to store the point number in each voxel
     points_in_one_voxel_array = []
+
+    # the array to store the average intensity of points in a voxel
     intensity_in_one_voxel_array = []
+
     while point_count < point_lengh - 1:
 
         # the counter of points number in one voxel
@@ -157,6 +164,7 @@ def voxelization(infile_path, outfile_path, voxel_size):
         code_array.append(code)
         point_count += 1
         voxel_count += 1
+
     # save the code to the csv file sequentially
     code_array_length = len(code_array)
     with open(outfile_path, 'wb') as csvfile:
@@ -183,18 +191,18 @@ def vertical_continiuity_analysis(dataset, point_count_array):
     previous_y = dataset[:, 1][0]
     minz = dataset[:, 2][0]
     seed_index = 0
-    # 计算出所有种子点
+    flag = 0
+    # 计算出所有种子
     while count < voxel_length:
         if dataset[:, 0][count] == previous_x and dataset[:, 1][count] == previous_y:
-            if dataset[:, 2][count] < minz:
-                minz = dataset[:, 2][count]
-                seed_index = count
+            if dataset[:, 2][count] - dataset[:,2][count-1] < 3 and flag == count - 1:
+                # 过滤边缘点
+                if points_count_array[count] > 2:
+                    seeds_list.append(count)
         else:
-            seeds_list.append(seed_index)
-            seed_index = count
-            minz = dataset[:, 2][count]
-        previous_x = dataset[:, 0][count]
-        previous_y = dataset[:, 1][count]
+            flag = count
+            previous_x = dataset[:, 0][count]
+            previous_y = dataset[:, 1][count]
         count += 1
     tree = scipy.spatial.cKDTree(dataset)
     # 存储3维位置点信息
@@ -306,7 +314,6 @@ def background_detection(dataset, radius, normal_threshold):
     seeds = np.array(seeds)
     ground = []
     max_len = 0
-    indice = 0
     temp_ground = []
     if len(regions) == 1:
         ground += seeds[regions[0]]
@@ -314,13 +321,14 @@ def background_detection(dataset, radius, normal_threshold):
         for region in regions:
             if len(region) > max_len:
                 max_len = len(region)
-                temp_ground = seeds[region]
-            if float(len(region)) / length < 0.2:
-                continue
-            else:
-                ground += seeds[region]
-    if len(ground) == 0:
-        ground.append(temp_ground)
+                ground = []
+                ground = seeds[region]
+            # if float(len(region)) / length < 0.2:
+            #     continue
+            # else:
+            #     ground += list(seeds[region])
+    # if len(ground) == 0:
+    #     ground.append(temp_ground)
     return normal_list, ground
 
 
@@ -370,11 +378,14 @@ def convex_hull_area(dataset):
 
 def selection_by_area(dataset):
     selected_region_list = []
-    neighbor_distance = 1.5
+    neighbor_distance = 2
     regions = region_growing(dataset, neighbor_distance)
     for region in regions:
         if len(region) * VOXEL_SIZE ** 2 <= MAX_AREA:
-            selected_region_list.append(region)
+            deltax = max(dataset[region][:,0])-min(dataset[region][:,0])
+            deltay = max(dataset[region][:,1])-min(dataset[region][:,1])
+            if deltax < 5 and deltay < 5:
+                selected_region_list.append(region)
         # else:
         #     # ！！！！！！！！！！此处可能有异常，未处理
         #     x_array = dataset[region, 0]
@@ -671,6 +682,7 @@ def imporved_isolation_analysis(dataset, horizontal_location_list_list, location
         location_count += 1
     return selected_indices
 
+
 if __name__ == '__main__':
     import yylog
 
@@ -688,13 +700,11 @@ if __name__ == '__main__':
     outcsv1 = outcsv[:-4] + '_1' + '.csv'
 
     ####################新建加入新字段的las文件###################
-    start = time.clock()
     # 如果已经添加过字段了就不用再添加
     if not os.path.exists(outlas):
         print "Adding dimensions..."
         add_dimension(infilepath, outlas, ["voxel_index", "tlocation", "olocation", "flocation"], [5, 5, 5, 5],
                       ["voxel num the point in", "original location label", "merged location label", "temp"])
-    print "Adding dimensions costs seconds ", time.clock() - start
 
     ############### 1.体素化 ################
     # 如果体素化了下一次就不用体素化了
@@ -715,37 +725,40 @@ if __name__ == '__main__':
     ############## 2.垂直连续性分析 ################
     log = yylog.LOG('pole')
     try:
+        start = timeit.default_timer()
         print '\n2. vertical_continiuity_analysis...'
         horizontal_location_list, location_list_list = vertical_continiuity_analysis(original_dataset, points_count_array)
 
     ################### 3.过滤 ####################
-        print '\n3. filtering...'
-        print '\n   3.1 background_detection...'
-        if not os.path.exists(outcsv1):
-            normals, ground = background_detection(original_dataset, MAX_NEIGHBOR_DISTANCE / VOXEL_SIZE, GROUND_NORMAL_THRESHOLD)
-            with open(outcsv1, 'wb') as out_csv:
-                count = 0
-                writer = csv.writer(out_csv)
-                while count < len(ground):
-                    writer.writerow(ground[count])
-                    count += 1
-        else:
-            print '\n      3.1.1 Reading from files...'
-            ground = []
-            with open(outcsv1, 'rb') as in_csv:
-                count = 0
-                reader = csv.reader(in_csv)
-                for row1 in reader:
-                    for item in row1:
-                        ground.append(int(item))
+        if USE_GROUND:
+            print '\n3. filtering...'
+            print '\n   3.1 background_detection...'
+            if not os.path.exists(outcsv1):
+                normals, ground = background_detection(original_dataset, MAX_NEIGHBOR_DISTANCE / VOXEL_SIZE, GROUND_NORMAL_THRESHOLD)
+                with open(outcsv1, 'wb') as out_csv:
+                    # count = 0
+                    writer = csv.writer(out_csv)
+                    writer.writerow(ground)
+            else:
+                print '\n      3.1.1 Reading from files...'
+                ground = []
+                with open(outcsv1, 'rb') as in_csv:
+                    count = 0
+                    reader = csv.reader(in_csv)
+                    for row1 in reader:
+                        for item in row1:
+                            ground.append(int(item))
 
-        print '\n   3.2 filtering_by_distance_to_ground...'
-        filtered_indices = filtering_by_distance_to_ground(original_dataset, ground, horizontal_location_list)
-        filtered_indices.sort(cmp=None, key=None, reverse=True)
-        for item in filtered_indices:
-            horizontal_location_list.remove(horizontal_location_list[item])
-            location_list_list.remove(location_list_list[item])
+            print '\n   3.2 filtering_by_distance_to_ground...'
+            filtered_indices = filtering_by_distance_to_ground(original_dataset, ground, horizontal_location_list)
+            filtered_indices.sort(cmp=None, key=None, reverse=True)
+            for item in filtered_indices:
+                horizontal_location_list.remove(horizontal_location_list[item])
+                location_list_list.remove(location_list_list[item])
+
         original_location_list_list = location_list_list[:]
+        original_horizontal_list_list = horizontal_location_list[:]
+
         dataset = original_dataset[horizontal_location_list]
         print '\n   3.3 selection_by_area...'
         selected_regions = selection_by_area(dataset)
@@ -768,63 +781,83 @@ if __name__ == '__main__':
         for indice in selected_indices:
             final_horizontal_list_list.append(filtered_horizontal_location_list_list[indice])
             final_list_list.append(filtered_location_list_list[indice])
+        stop = timeit.default_timer()
+        print stop - start
+    ################ 5. 增加邻居点 #################
+        print '\n5. adding neighbors...'
+        tree = scipy.spatial.cKDTree(original_dataset)
+        count = 0
+        for items in final_list_list:
+            temp_list = items[:]
+            for item in temp_list:
+                neighbors = tree.query_ball_point(original_dataset[item], 1)
+                for neighbor in neighbors:
+                    if neighbor not in items:
+                        final_list_list[count].append(neighbor)
+            count += 1
+
+    ################## 6.标记点云 ##################
+        print '\n6. lableling...'
+        original_location_array = np.array([0] * len(voxel_code_array))
+        location_array = np.array([0] * len(voxel_code_array))
+        horizontal_location_array = np.array([0]*len(voxel_code_array))
+        slected_location_array = np.array([0] * len(voxel_code_array))
+        selected_horizontal_location_array = np.array([0]*len(voxel_code_array))
+        if USE_GROUND:
+            ground_array = np.array([0] * len(voxel_code_array))
+
+        count = 1
+        for location in original_location_list_list:
+            original_location_array[location] = count
+            count += 1
+
+        if USE_GROUND:
+            ground_array[ground] = 1
+
+        count = 1
+        for location_list in filtered_location_list_list:
+            location_array[location_list] = count
+            count += 1
+
+        count = 1
+        for location in original_horizontal_list_list:
+            horizontal_location_array[location] = count
+            count += 1
+
+        count = 1
+        for location_list in final_list_list:
+            slected_location_array[location_list] = count
+            count += 1
+
+        count = 1
+        for location_list in final_horizontal_list_list:
+            selected_horizontal_location_array[location_list] = count
+            count += 1
+
+        lasfile = laspy.file.File(outlas, mode="rw")
+        point_count = 0
+        # lasfile.olocation[:] = 0
+        # lasfile.tlocation[:] = 0
+        # lasfile.flocation[:] = 0
+        lasfile.user_data[:] = 0
+        lasfile.gps_time[:] = 0
+        if USE_GROUND:
+            lasfile.raw_classification[:] = 0
+        lasfile.pt_src_id[:] = 0
+        for voxel_index in lasfile.voxel_index:
+            lasfile.olocation[point_count] = original_location_array[voxel_index]
+            lasfile.tlocation[point_count] = location_array[voxel_index]
+            lasfile.flocation[point_count] = slected_location_array[voxel_index]
+            lasfile.gps_time[point_count] = horizontal_location_array[voxel_index]
+            if USE_GROUND:
+                lasfile.raw_classification[point_count] = ground_array[voxel_index]
+            lasfile.user_data[point_count] = selected_horizontal_location_array[voxel_index]
+
+            point_count += 1
+        lasfile.close()
+
     except:
-        log.error() #使用系统自己的错误描述
+        log.error()  # 使用系统自己的错误描述
         os.system('pause')
         exit()
-    ################## 5.标记点云 ##################
-    print '\n5. lableling...'
-    original_location_array = np.array([0] * len(voxel_code_array))
-    location_array = np.array([0] * len(voxel_code_array))
-    horizontal_location_array = np.array([0]*len(voxel_code_array))
-    slected_location_array = np.array([0] * len(voxel_code_array))
-    selected_horizontal_location_array = np.array([0]*len(voxel_code_array))
-    ground_array = np.array([0] * len(voxel_code_array))
-
-    count = 1
-    for location in original_location_list_list:
-        original_location_array[location] = count
-        count += 1
-
-
-    ground_array[ground] = 1
-
-    count = 1
-    for location_list in filtered_location_list_list:
-        location_array[location_list] = count
-        count += 1
-
-    count = 1
-    for location in filtered_horizontal_location_list_list:
-        horizontal_location_array[location] = count
-        count += 1
-
-    count = 1
-    for location_list in final_list_list:
-        slected_location_array[location_list] = count
-        count += 1
-
-    count = 1
-    for location_list in final_horizontal_list_list:
-        selected_horizontal_location_array[location_list] = count
-        count += 1
-
-    lasfile = laspy.file.File(outlas, mode="rw")
-    point_count = 0
-    lasfile.olocation[:] = 0
-    lasfile.tlocation[:] = 0
-    lasfile.flocation[:] = 0
-    lasfile.user_data[:] = 0
-    lasfile.gps_time[:] = 0
-    lasfile.raw_classification[:] = 0
-    lasfile.pt_src_id[:] = 0
-    for voxel_index in lasfile.voxel_index:
-        lasfile.tlocation[point_count] = location_array[voxel_index]
-        lasfile.gps_time[point_count] = horizontal_location_array[voxel_index]
-        lasfile.raw_classification[point_count] = ground_array[voxel_index]
-        lasfile.flocation[point_count] = slected_location_array[voxel_index]
-        lasfile.user_data[point_count] = selected_horizontal_location_array[voxel_index]
-        lasfile.olocation[point_count] = original_location_array[voxel_index]
-        point_count += 1
-    lasfile.close()
     os.system('pause')
