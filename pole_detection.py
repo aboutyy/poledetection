@@ -16,13 +16,13 @@ import scipy.spatial
 VOXEL_SIZE = 0.15
 
 # 最小杆高度
-MIN_HEIGHT = 1
+MIN_HEIGHT = 1.0
 
 # 杆离地面最大距离
 DISTANCE_TO_GROUND = 1.05
 
 # 杆在地面的最大面积
-MAX_AREA = 0.36
+MAX_AREA = 0.5
 
 # 邻居最远体素距离
 MAX_NEIGHBOR_DISTANCE = 0.34
@@ -33,8 +33,11 @@ GROUND_NORMAL_THRESHOLD = 0.7
 # 作圆柱判断的最小圆柱高度
 MIN_CYLINDER_HEIGHT = 0.6
 
+# 内圆柱半径
+INNER_RADIUS = 0.45
+
 # 双圆柱内外圆柱之间的距离
-DISTANCE_OF_IN2OUT = 0.2
+DISTANCE_OF_IN2OUT = 0.3
 
 # 双圆柱用来定义杆的内外点比例
 RATIO_OF_POINTS_COUNT = 0.95
@@ -42,6 +45,14 @@ RATIO_OF_POINTS_COUNT = 0.95
 # 是否进行地面距离判定
 USE_GROUND = True
 
+# 地面点判断时的邻居点最远距离
+GROUND_NEIGHBOR = 0.3
+
+# 合并相邻垂直voxel组的距离阈值
+MERGING_DISTANCE = 0.6
+
+# 过滤长宽
+FILTERING_LENGTH = 1.05
 
 def add_dimension(infile_path, outfile_path, names, types, descriptions):
     """
@@ -189,15 +200,13 @@ def vertical_continiuity_analysis(dataset, point_count_array):
     count = 1
     previous_x = dataset[:, 0][0]
     previous_y = dataset[:, 1][0]
-    minz = dataset[:, 2][0]
-    seed_index = 0
     flag = 0
     # 计算出所有种子
     while count < voxel_length:
         if dataset[:, 0][count] == previous_x and dataset[:, 1][count] == previous_y:
             if dataset[:, 2][count] - dataset[:,2][count-1] < 3 and flag == count - 1:
                 # 过滤边缘点
-                if points_count_array[count] > 2:
+                if points_count_array[count] > 1:
                     seeds_list.append(count)
         else:
             flag = count
@@ -221,19 +230,29 @@ def vertical_continiuity_analysis(dataset, point_count_array):
             neighbors = np.array(neighbors)
             up_neighbor_lenght = 0
             if len(neighbors) > 0:
-                up_index = np.where(dataset[:, 2][neighbors] - dataset[:, 2][current_seed] == 1)[0]
-                up_neighbor_lenght = len(up_index)
+                # 找出上邻居点
+                up_indexs = np.where(dataset[:, 2][neighbors] - dataset[:, 2][current_seed] == 1)[0]
+                # 找出正上点
+                up_index = np.where((dataset[:, 2][neighbors] - dataset[:, 2][current_seed] == 1) &
+                                    (dataset[:, 0][neighbors] == dataset[:, 0][current_seed]) &
+                                    (dataset[:, 1][neighbors] == dataset[:, 1][current_seed]))[0]
+                up_neighbor_lenght = len(up_indexs)
                 if up_neighbor_lenght > 0:
                     vertical_count += 1
                     if up_neighbor_lenght == 1:
-                        current_seed = neighbors[up_index][0]
+                        current_seed = neighbors[up_indexs][0]
+                    elif len(up_index) != 0:
+                        current_seed = neighbors[up_index[0]]
                     else:
-                        temp_index = np.where(point_count_array[neighbors[up_index]] ==
-                                              max(point_count_array[neighbors[up_index]]))[0][0]
-                        current_seed = neighbors[up_index[temp_index]]
-                    location_list.append(current_seed)
+                        temp_index = np.where(point_count_array[neighbors[up_indexs]] ==
+                                              max(point_count_array[neighbors[up_indexs]]))[0][0]
+                        current_seed = neighbors[up_indexs[temp_index]]
+                    # 加入所有邻居点到潜在杆位置点中
+                    for index in neighbors[up_indexs]:
+                        location_list.append(index)
         # 若向上增长能达到一定高度，则被认为是一个潜在的位置点
-        if len(location_list) * VOXEL_SIZE >= MIN_HEIGHT:
+        height = max(dataset[:, 2][location_list]) - min(dataset[:, 2][location_list])
+        if height * VOXEL_SIZE >= MIN_HEIGHT:
             location_list_list.append(location_list)
             horizontal_location_list.append(seed)
     return horizontal_location_list, location_list_list
@@ -264,6 +283,41 @@ def region_growing(voxelset, radius):
             current_seed_neighbors = \
                 tree.query_ball_point([voxelset[:, 0][current_seed], voxelset[:, 1][current_seed],
                                         voxelset[:, 2][current_seed]], radius)
+            for neighbor in current_seed_neighbors:
+                if voxel_indices.count(neighbor) != 0:
+                        if current_region_voxels.count(neighbor) == 0:
+                            current_region_voxels.append(neighbor)
+                        voxel_indices.remove(neighbor)
+                        if current_seeds.count(neighbor) == 0:
+                            current_seeds.append(neighbor)
+        regions.append(np.array(current_region_voxels))
+        seed_length = len(voxel_indices)
+    return regions
+
+
+def region_growing_two_dimensional(dataset, radius):
+    # codes below were region growing algorithm implemented based pseudocode in
+    # http://pointclouds.org/documentation/tutorials/region_growing_segmentation.php#region-growing-segmentation
+
+    tree = scipy.spatial.cKDTree(dataset)
+    length = len(dataset)
+    voxel_indices = range(length)
+    seed_length = len(voxel_indices)
+    # region list
+    regions = []
+    while seed_length > 0:
+        current_region_voxels = []
+        current_seeds = []
+        # voxel with lowest z value
+        lowest_voxel_indice = voxel_indices[0]
+        current_seeds.append(lowest_voxel_indice)
+        current_region_voxels.append(lowest_voxel_indice)
+        del voxel_indices[0]
+        count = 0
+        while count < len(current_seeds):
+            current_seed = current_seeds[count]
+            count += 1
+            current_seed_neighbors = tree.query_ball_point([dataset[:, 0][current_seed], dataset[:, 1][current_seed]], radius)
             for neighbor in current_seed_neighbors:
                 if voxel_indices.count(neighbor) != 0:
                         if current_region_voxels.count(neighbor) == 0:
@@ -309,12 +363,11 @@ def background_detection(dataset, radius, normal_threshold):
 
     voxel_set = np.vstack([original_x_int_array[seeds], original_y_int_array[seeds],
                           original_z_int_array[seeds]]).transpose()
-    regions = region_growing(voxel_set, 1.5)
+    regions = region_growing(voxel_set, GROUND_NEIGHBOR / VOXEL_SIZE)
 
     seeds = np.array(seeds)
     ground = []
     max_len = 0
-    temp_ground = []
     if len(regions) == 1:
         ground += seeds[regions[0]]
     else:
@@ -352,50 +405,21 @@ def filtering_by_distance_to_ground(dataset, ground_indices, horizontal_location
     return filtered_indices
 
 
-def convex_hull_area(dataset):
-    """
-    计算凸包面积
-
-    """
-    # 计算凸包
-    cv = scipy.spatial.ConvexHull(dataset)
-
-    def polygonarea(corners):
-        """
-        计算外包多边形面积http://stackoverflow.com/questions/24467972/calculate-area-of-polygon-given-x-y-coordinates
-        """
-        n = len(corners) # of corners
-        area = 0.0
-        for i in range(n):
-            j = (i + 1) % n
-            area += corners[i][0] * corners[j][1]
-            area -= corners[j][0] * corners[i][1]
-        area = abs(area) / 2.0
-        return area
-
-    return polygonarea(dataset[cv.vertices])
-
-
-def selection_by_area(dataset):
+def selection_by_area_deltax_deltay(dataset1, dataset2, distance, length):
     selected_region_list = []
-    neighbor_distance = 2
-    regions = region_growing(dataset, neighbor_distance)
+    neighbor_distance = distance / VOXEL_SIZE
+    regions = region_growing_two_dimensional(dataset1, neighbor_distance)
     for region in regions:
-        if len(region) * VOXEL_SIZE ** 2 <= MAX_AREA:
-            deltax = max(dataset[region][:,0])-min(dataset[region][:,0])
-            deltay = max(dataset[region][:,1])-min(dataset[region][:,1])
-            if deltax < 5 and deltay < 5:
+        temp_x = []
+        temp_y = []
+        for item in region:
+            temp_x.append(dataset2[item][0])
+            temp_y.append(dataset2[item][1])
+        if len(temp_x) * VOXEL_SIZE ** 2 <= MAX_AREA:
+            deltax = max(temp_x) - min(temp_x)
+            deltay = max(temp_y) - min(temp_y)
+            if deltax < length/VOXEL_SIZE and deltay < length/VOXEL_SIZE:
                 selected_region_list.append(region)
-        # else:
-        #     # ！！！！！！！！！！此处可能有异常，未处理
-        #     x_array = dataset[region, 0]
-        #     y_array = dataset[region, 1]
-        #     data = np.vstack([x_array, y_array]).transpose()
-        #     if len(data) <= 4:
-        #         selected_region_list.append(region)
-        #     area = convex_hull_area(data)
-        #     if area * VOXEL_SIZE**2 < MAX_AREA:
-        #         selected_region_list.append(region)
     return selected_region_list
 
 
@@ -543,10 +567,8 @@ def ransac_fit_line_3d(dataset, n, k, t, d):
         return None
     # import matplotlib.pyplot as plt
     # import mpl_toolkits.mplot3d as m3d
-    #
     # linepts = [[best_model[0], best_model[1], best_model[2]], [best_model[0] + 10 * best_model[3], best_model[1] + 10 * best_model[4], best_model[2] + 10 * best_model[5]]]
     # linepts = np.array(linepts)
-    #
     # ax = m3d.Axes3D(plt.figure())
     # ax.scatter(dataset[:, 0], dataset[:, 1], dataset[:, 2], zdir='z', s=100, c='r', marker='.')
     # ax.plot3D(linepts[:,0], linepts[:,1], linepts[:,2], 'r')
@@ -575,6 +597,63 @@ def oneandtwo(a, b, c):
     return x1, x2
 
 
+def isolation_analysis(dataset, horizontal_location_list_list, location_list_list, points_in_one_voxel_array):
+    """
+    传统圆柱分析方法
+    """
+    tree = scipy.spatial.cKDTree(dataset)
+    location_count = 0
+    selected_indices = []
+    for location_list, horizontal_location_list in zip(location_list_list, horizontal_location_list_list):
+        # inner_radius = estimate_radius(dataset[horizontal_location_list])
+        inner_radius = INNER_RADIUS / VOXEL_SIZE
+        outer_radius = inner_radius + DISTANCE_OF_IN2OUT / VOXEL_SIZE
+        # 为了减少计算，先求出一个球内的点，再从中筛选
+        query_radius = ((MIN_CYLINDER_HEIGHT*0.5/VOXEL_SIZE)**2 + (outer_radius) ** 2)**0.5
+        bottom_z = min(dataset[location_list][:, 2])
+        top_z = max(dataset[location_list][:, 2])
+        current_bottom = bottom_z
+        current_top = current_bottom + MIN_CYLINDER_HEIGHT / VOXEL_SIZE
+        while current_bottom + MIN_CYLINDER_HEIGHT / VOXEL_SIZE <= top_z:
+            # 当前范围内的位置点
+            current_indices = np.where((dataset[location_list][:,2] >= current_bottom)&(dataset[location_list][:,2] <= current_bottom+MIN_CYLINDER_HEIGHT / VOXEL_SIZE))
+            center_x = sum(dataset[np.array(location_list)][current_indices][:, 0]) / len(current_indices[0])
+            center_y = sum(dataset[np.array(location_list)][current_indices][:, 1]) / len(current_indices[0])
+            center_z = (current_bottom + current_top) * 0.5
+            subset_indices = tree.query_ball_point([center_x, center_y, center_z], query_radius)
+            subset_indices = np.array(subset_indices)
+            sub_dataset = dataset[subset_indices]
+            distance_list = []
+            for data in sub_dataset:
+                dis = ((data[0] - center_x)**2 + (data[1] - center_y)**2)**0.5
+                distance_list.append(dis)
+            distance_array = np.array(distance_list)
+
+            in_voxel_indices = np.where(np.logical_and((abs(distance_array - inner_radius) <= 1e-10) | (distance_array <
+                                                                                                        inner_radius),
+                                                       ((sub_dataset[:, 2] > current_bottom) |
+                                                        (abs(sub_dataset[:, 2] - current_bottom) <= 1e-10)) &
+                                                       ((sub_dataset[:, 2] < current_top) |
+                                                        (abs(sub_dataset[:,2] - current_top) <= 1e-10))))
+            out_voxel_indices = np.where(np.logical_and((distance_array > inner_radius) & ((abs(distance_array - outer_radius) <= 1e-10)|(distance_array < outer_radius)),
+                                                        ((sub_dataset[:, 2] > current_bottom) |
+                                                        (abs(sub_dataset[:, 2] - current_bottom) <= 1e-10)) &
+                                                       ((sub_dataset[:, 2] < current_top) |
+                                                        (abs(sub_dataset[:,2] - current_top) <= 1e-10))))
+            in_points_count = sum(points_in_one_voxel_array[subset_indices[in_voxel_indices]])
+            out_points_count = sum(points_in_one_voxel_array[subset_indices[out_voxel_indices]])
+
+            # 向上移动一格
+            current_bottom += 1
+            current_top += 1
+            if in_points_count > 0:
+                if in_points_count / (in_points_count + out_points_count) >= RATIO_OF_POINTS_COUNT:
+                    selected_indices.append(location_count)
+                    break
+        location_count += 1
+    return selected_indices
+
+
 def imporved_isolation_analysis(dataset, horizontal_location_list_list, location_list_list, points_in_one_voxel_array):
     """
     通过计算轴心线来判断杆是否部分符合双圆柱模型
@@ -593,8 +672,10 @@ def imporved_isolation_analysis(dataset, horizontal_location_list_list, location
     selected_indices = []
     for location_list, horizontal_location_list in zip(location_list_list, horizontal_location_list_list):
         # inner_radius = estimate_radius(dataset[horizontal_location_list])
-        inner_radius = 0.4 / VOXEL_SIZE
+        inner_radius = INNER_RADIUS / VOXEL_SIZE
         outer_radius = inner_radius + DISTANCE_OF_IN2OUT / VOXEL_SIZE
+        # 为了减少计算，先求出一个球内的点，再从中筛选
+        query_radius = ((MIN_CYLINDER_HEIGHT*0.5/VOXEL_SIZE)**2 + (outer_radius) ** 2)**0.5
         bottom_z = min(dataset[location_list][:, 2])
         top_z = max(dataset[location_list][:, 2])
         current_bottom = bottom_z
@@ -604,7 +685,7 @@ def imporved_isolation_analysis(dataset, horizontal_location_list_list, location
             line_indices = np.where((dataset[location_list][:,2] >= current_bottom)&(dataset[location_list][:,2] <= current_bottom+MIN_CYLINDER_HEIGHT / VOXEL_SIZE))
             fit_dataset = dataset[np.array(location_list)[line_indices]]
             min_length = min(MIN_CYLINDER_HEIGHT / VOXEL_SIZE, 0.5*len(fit_dataset) + 1)
-            model = ransac_fit_line_3d(fit_dataset, 2, 50, 0, min_length)
+            model = ransac_fit_line_3d(fit_dataset, 2, 25, 0, min_length)
             if model is None:
                 current_bottom += 1
                 continue
@@ -631,8 +712,7 @@ def imporved_isolation_analysis(dataset, horizontal_location_list_list, location
             centerx = (x0 + x1) / 2
             centery = (y0 + y1) / 2
             centerz = (z0 + z1) / 2
-            # 为了减少计算，先求出一个球内的点，再从中筛选
-            query_radius = ((MIN_CYLINDER_HEIGHT*0.5/VOXEL_SIZE)**2 + (outer_radius) ** 2)**0.5
+
             subset_indices = tree.query_ball_point([centerx, centery, centerz], query_radius)
             subset_indices = np.array(subset_indices)
 
@@ -665,11 +745,10 @@ def imporved_isolation_analysis(dataset, horizontal_location_list_list, location
                                                                                       m*x1 - n*y1 -p*z1)) /\
                             (m**2 + n**2 + p**2)**0.5
 
-            in_voxel_indices = np.where(np.logical_and(distance_array <= inner_radius,
-                                                       distances_sum <= MIN_CYLINDER_HEIGHT / VOXEL_SIZE))
-            out_voxel_indices = np.where(np.logical_and((distance_array > inner_radius) &
-                                                        (distance_array <= outer_radius),
-                                                        distances_sum <= MIN_CYLINDER_HEIGHT / VOXEL_SIZE))
+            in_voxel_indices = np.where(np.logical_and((abs(distance_array - inner_radius) <= 1e-10) | (distance_array < inner_radius),
+                                                       (abs(distances_sum - MIN_CYLINDER_HEIGHT / VOXEL_SIZE <= 0.1e-10))|(distances_sum < MIN_CYLINDER_HEIGHT/VOXEL_SIZE)))
+            out_voxel_indices = np.where(np.logical_and((distance_array > inner_radius) & ((abs(distance_array - outer_radius) <= 1e-10)|(distance_array < outer_radius)),
+                                                        distances_sum - MIN_CYLINDER_HEIGHT / VOXEL_SIZE <= 0.1e-10))
             in_points_count = sum(points_in_one_voxel_array[subset_indices[in_voxel_indices]])
             out_points_count = sum(points_in_one_voxel_array[subset_indices[out_voxel_indices]])
 
@@ -759,9 +838,17 @@ if __name__ == '__main__':
         original_location_list_list = location_list_list[:]
         original_horizontal_list_list = horizontal_location_list[:]
 
-        dataset = original_dataset[horizontal_location_list]
         print '\n   3.3 selection_by_area...'
-        selected_regions = selection_by_area(dataset)
+        x_list = []
+        y_list = []
+        # 计算垂直块的中心
+        for location_list in location_list_list:
+            data = original_dataset[location_list]
+            x_list.append(sum(data[:, 0]) / float(len(data)))
+            y_list.append(sum(data[:, 1]) / float(len(data)))
+        dataset1 = np.vstack([x_list, y_list]).transpose()
+        dataset2 = original_dataset[horizontal_location_list]
+        selected_regions = selection_by_area_deltax_deltay(dataset1, dataset2, MERGING_DISTANCE, FILTERING_LENGTH)
         filtered_horizontal_location_list_list = []
         filtered_location_list_list = []
         horizontal_location_list = np.array(horizontal_location_list)
@@ -775,34 +862,41 @@ if __name__ == '__main__':
 
      ################# 4.双圆柱分析 #################
         print '\n4. double cylinder analysis...'
-        selected_indices = imporved_isolation_analysis(original_dataset, filtered_horizontal_location_list_list, filtered_location_list_list, points_count_array)
-        final_horizontal_list_list =[]
-        final_list_list = []
-        for indice in selected_indices:
-            final_horizontal_list_list.append(filtered_horizontal_location_list_list[indice])
-            final_list_list.append(filtered_location_list_list[indice])
+        selected_indices1 = isolation_analysis(original_dataset, filtered_horizontal_location_list_list, filtered_location_list_list, points_count_array)
+        selected_indices2 = imporved_isolation_analysis(original_dataset, filtered_horizontal_location_list_list, filtered_location_list_list, points_count_array)
+        final_horizontal_list_list1 =[]
+        final_list_list1 = []
+        final_horizontal_list_list2 =[]
+        final_list_list2 = []
+        for indice1, indice2 in zip(selected_indices1, selected_indices2):
+            final_horizontal_list_list1.append(filtered_horizontal_location_list_list[indice1])
+            final_list_list1.append(filtered_location_list_list[indice1])
+            final_horizontal_list_list2.append(filtered_horizontal_location_list_list[indice2])
+            final_list_list2.append(filtered_location_list_list[indice2])
         stop = timeit.default_timer()
         print stop - start
     ################ 5. 增加邻居点 #################
-        print '\n5. adding neighbors...'
-        tree = scipy.spatial.cKDTree(original_dataset)
-        count = 0
-        for items in final_list_list:
-            temp_list = items[:]
-            for item in temp_list:
-                neighbors = tree.query_ball_point(original_dataset[item], 1)
-                for neighbor in neighbors:
-                    if neighbor not in items:
-                        final_list_list[count].append(neighbor)
-            count += 1
+        # print '\n5. adding neighbors...'
+        # tree = scipy.spatial.cKDTree(original_dataset)
+        # count = 0
+        # for items in final_list_list:
+        #     temp_list = items[:]
+        #     for item in temp_list:
+        #         neighbors = tree.query_ball_point(original_dataset[item], 1)
+        #         for neighbor in neighbors:
+        #             if neighbor not in items:
+        #                 final_list_list[count].append(neighbor)
+        #     count += 1
 
     ################## 6.标记点云 ##################
         print '\n6. lableling...'
         original_location_array = np.array([0] * len(voxel_code_array))
         location_array = np.array([0] * len(voxel_code_array))
         horizontal_location_array = np.array([0]*len(voxel_code_array))
-        slected_location_array = np.array([0] * len(voxel_code_array))
-        selected_horizontal_location_array = np.array([0]*len(voxel_code_array))
+        slected_location_array1 = np.array([0] * len(voxel_code_array))
+        slected_location_array2 = np.array([0] * len(voxel_code_array))
+        selected_horizontal_location_array1 = np.array([0]*len(voxel_code_array))
+        selected_horizontal_location_array2 = np.array([0]*len(voxel_code_array))
         if USE_GROUND:
             ground_array = np.array([0] * len(voxel_code_array))
 
@@ -825,13 +919,22 @@ if __name__ == '__main__':
             count += 1
 
         count = 1
-        for location_list in final_list_list:
-            slected_location_array[location_list] = count
+        for location_list in final_list_list1:
+            slected_location_array1[location_list] = count
             count += 1
 
         count = 1
-        for location_list in final_horizontal_list_list:
-            selected_horizontal_location_array[location_list] = count
+        for location_list in final_list_list2:
+            slected_location_array2[location_list] = count
+            count += 1
+
+        count = 1
+        for location_list in final_horizontal_list_list1:
+            selected_horizontal_location_array1[location_list] = count
+            count += 1
+        count = 1
+        for location_list in final_horizontal_list_list2:
+            selected_horizontal_location_array2[location_list] = count
             count += 1
 
         lasfile = laspy.file.File(outlas, mode="rw")
@@ -847,11 +950,12 @@ if __name__ == '__main__':
         for voxel_index in lasfile.voxel_index:
             lasfile.olocation[point_count] = original_location_array[voxel_index]
             lasfile.tlocation[point_count] = location_array[voxel_index]
-            lasfile.flocation[point_count] = slected_location_array[voxel_index]
+            lasfile.flocation[point_count] = slected_location_array1[voxel_index]
             lasfile.gps_time[point_count] = horizontal_location_array[voxel_index]
+            lasfile.pt_src_id[point_count] = slected_location_array2[voxel_index]
             if USE_GROUND:
                 lasfile.raw_classification[point_count] = ground_array[voxel_index]
-            lasfile.user_data[point_count] = selected_horizontal_location_array[voxel_index]
+            lasfile.user_data[point_count] = selected_horizontal_location_array1[voxel_index]
 
             point_count += 1
         lasfile.close()
